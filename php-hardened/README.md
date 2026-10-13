@@ -17,15 +17,13 @@ Vulnerability scanners see the Go modules in the binary (Caddy and FrankenPHP), 
 into it, such as OpenSSL, curl and librdkafka. Instead, the images are rebuilt with the latest release of every
 library once a week (see [Updates](#updates)), and each image lists the versions it contains.
 
-`<registry>/<repository>` below stands for the image repository, which is not set up yet.
-
-| Tag | Use |
+| Image | Use |
 | --- | --- |
-| `<registry>/<repository>:8.5` | Runtime, the latest PHP 8.5 release |
-| `<registry>/<repository>:8.5.11` | Runtime, pinned to a PHP release |
-| `<registry>/<repository>:8.5-build` | Build stage and CI: the same PHP with Composer, git and a shell |
-| `<registry>/<repository>:8.5.11-build` | The build image, pinned to a PHP release |
-| `<registry>/<repository>:8.4`, ... | The same for PHP 8.4 |
+| `1x.ax/mamluk/enterprise/php/8.5:franken` | Runtime, the latest PHP 8.5 release |
+| `1x.ax/mamluk/enterprise/php/8.5:franken-8.5.11` | Runtime, pinned to a PHP release |
+| `1x.ax/mamluk/enterprise/php/8.5:franken-build` | Build stage and CI: the same PHP with Composer, git and a shell |
+| `1x.ax/mamluk/enterprise/php/8.5:franken-build-8.5.11` | The build image, pinned to a PHP release |
+| `1x.ax/mamluk/enterprise/php/8.4:...` | The same for PHP 8.4 |
 
 ## Extensions
 
@@ -51,7 +49,7 @@ Each image records what it contains, in `/usr/share/kipchak-runtime/`:
 Install dependencies in the build image, and copy the result into the runtime:
 
 ```dockerfile
-FROM <registry>/<repository>:8.5-build AS build
+FROM 1x.ax/mamluk/enterprise/php/8.5:franken-build AS build
 
 COPY composer.json composer.lock ./
 RUN --mount=type=secret,id=composer-auth,target=/root/.composer/auth.json \
@@ -60,7 +58,7 @@ COPY . .
 RUN composer dump-autoload --no-dev --classmap-authoritative \
     && rm -rf .git .gitignore tests
 
-FROM <registry>/<repository>:8.5
+FROM 1x.ax/mamluk/enterprise/php/8.5:franken
 
 COPY --from=build /var/www /var/www
 # Optional: your own Caddyfile. The default runs html/index.php as a worker on port 8080.
@@ -146,10 +144,10 @@ Concourse builds and pushes both PHP versions, for both architectures, from
 `concourse-pipelines/pipelines/mamluk/kipchak-runtime.yml`: on every commit, and daily. To build by hand:
 
 ```bash
-IMAGE=<registry>/<repository> ./build.sh            # PHP 8.4 and 8.5, both architectures, pushed with an SBOM and provenance
-IMAGE=<registry>/<repository> ./build.sh 8.5        # one version
-IMAGE=<registry>/<repository> PUSH=0 ./build.sh 8.5 # build only
-SOURCES_EPOCH=$(date +%s) IMAGE=... ./build.sh      # refresh the libraries now, rather than at the start of the week
+./build.sh            # PHP 8.4 and 8.5, both architectures, pushed with an SBOM and provenance
+./build.sh 8.5        # one version
+PUSH=0 ./build.sh 8.5 # build only
+SOURCES_EPOCH=$(date +%s) ./build.sh # refresh the libraries now, rather than at the start of the week
 ```
 
 A plain `docker build` needs `--build-arg PHP_VERSION=8.5.11`, the exact release.

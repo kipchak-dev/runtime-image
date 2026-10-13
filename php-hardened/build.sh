@@ -3,12 +3,13 @@
 # Builds and pushes the hardened runtime and build images for PHP 8.4 and 8.5, for linux/amd64 and linux/arm64.
 # Concourse does the same in pipelines/mamluk/kipchak-runtime.yml; this script is for building by hand.
 #
-#   IMAGE=registry.example/kipchak/runtime ./build.sh             build and push everything
-#   IMAGE=registry.example/kipchak/runtime ./build.sh 8.5         one PHP version
-#   IMAGE=registry.example/kipchak/runtime PUSH=0 ./build.sh 8.5  build without pushing
+#   ./build.sh             build and push everything
+#   ./build.sh 8.5         one PHP version
+#   PUSH=0 ./build.sh 8.5  build without pushing
 #
-# Each PHP version is built at its latest release, looked up on php.net. Tags, for PHP 8.5.11: 8.5 and 8.5.11
-# (runtime), 8.5-build and 8.5.11-build (build image).
+# Each PHP version is built at its latest release, looked up on php.net. Images, for PHP 8.5.11:
+#   1x.ax/mamluk/enterprise/php/8.5:franken        and :franken-8.5.11        the runtime
+#   1x.ax/mamluk/enterprise/php/8.5:franken-build  and :franken-build-8.5.11  the build image
 #
 # Libraries are refreshed to their latest releases once a week: SOURCES_EPOCH defaults to the ISO week. Set it to
 # anything else to force a refresh.
@@ -21,7 +22,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-IMAGE="${IMAGE:?Set IMAGE to the image repository, e.g. registry.example/kipchak/runtime}"
+REGISTRY="${REGISTRY:-1x.ax/mamluk/enterprise/php}"
 PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64}"
 BUILDER="${BUILDER:-kipchak-runtime}"
 PUSH="${PUSH:-1}"
@@ -62,8 +63,8 @@ for minor in "${versions[@]}"; do
 	esac
 
 	for target in runtime build; do
-		suffix=""
-		[ "${target}" = "build" ] && suffix="-build"
+		tag="franken"
+		[ "${target}" = "build" ] && tag="franken-build"
 
 		docker buildx build \
 			--builder "${BUILDER}" \
@@ -72,8 +73,8 @@ for minor in "${versions[@]}"; do
 			--build-arg PHP_VERSION="${php}" \
 			--build-arg SOURCES_EPOCH="${SOURCES_EPOCH}" \
 			${secrets[@]+"${secrets[@]}"} \
-			--tag "${IMAGE}:${minor}${suffix}" \
-			--tag "${IMAGE}:${php}${suffix}" \
+			--tag "${REGISTRY}/${minor}:${tag}" \
+			--tag "${REGISTRY}/${minor}:${tag}-${php}" \
 			${output[@]+"${output[@]}"} \
 			.
 	done
