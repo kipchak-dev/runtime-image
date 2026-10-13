@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Builds and pushes the hardened runtime and build images for PHP 8.4 and 8.5, for linux/amd64 and linux/arm64.
+# Builds and pushes the hardened runtime, build and Alpine images for PHP 8.4 and 8.5, for linux/amd64 and linux/arm64.
 # Concourse does the same in pipelines/mamluk/kipchak-runtime.yml; this script is for building by hand.
 #
 #   ./build.sh             build and push everything
@@ -10,6 +10,7 @@
 # Each PHP version is built at its latest release, looked up on php.net. Images, for PHP 8.5.11:
 #   1x.ax/mamluk/enterprise/php/8.5:franken        and :franken-8.5.11        the runtime
 #   1x.ax/mamluk/enterprise/php/8.5:franken-build  and :franken-build-8.5.11  the build image
+#   1x.ax/mamluk/enterprise/php/8.5:franken-alpine and :franken-alpine-8.5.11 the runtime on Alpine, to extend
 #
 # Libraries are refreshed to their latest releases once a week: SOURCES_EPOCH defaults to the ISO week. Set it to
 # anything else to force a refresh.
@@ -62,9 +63,11 @@ for minor in "${versions[@]}"; do
 		*) echo "Could not find the latest PHP ${minor} release on php.net" >&2; exit 1 ;;
 	esac
 
-	for target in runtime build; do
-		tag="franken"
-		[ "${target}" = "build" ] && tag="franken-build"
+	for target in runtime build alpine; do
+		case "${target}" in
+			runtime) tag="franken" ;;
+			*) tag="franken-${target}" ;;
+		esac
 
 		docker buildx build \
 			--builder "${BUILDER}" \

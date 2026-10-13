@@ -6,12 +6,14 @@ A FrankenPHP image for running Kipchak APIs in production, for PHP 8.4 and 8.5, 
 FrankenPHP and PHP are built from source into one static binary, linked against musl with mimalloc as the
 allocator. The image is that binary on an empty filesystem (`FROM scratch`), with:
 
+* `php`, a static PHP CLI with the same extensions, for console scripts;
 * CA certificates, `php.ini` and a Caddyfile;
 * a non-root user (`65532`), which runs the server;
 * `/tmp`, the only directory the runtime user can write to. PHP and Caddy keep their temporary files there.
 
-It has no shell, no package manager, no libc and no other programs, so an attacker who gets code execution has
-nothing to run. The image is 187 MB, against about 2 GB for the free `franken` image.
+It has no shell, no package manager, no libc and no programs other than `frankenphp` and `php`, so an attacker who
+gets code execution has nothing to run. The image is about 310 MB, almost all of it the two static binaries, against
+about 2 GB for the free `franken` image.
 
 Vulnerability scanners see the Go modules in the binary (Caddy and FrankenPHP), but not the C libraries compiled
 into it, such as OpenSSL, curl and librdkafka. Instead, the images are rebuilt with the latest release of every
@@ -23,6 +25,8 @@ library once a week (see [Updates](#updates)), and each image lists the versions
 | `1x.ax/mamluk/enterprise/php/8.5:franken-8.5.11` | Runtime, pinned to a PHP release |
 | `1x.ax/mamluk/enterprise/php/8.5:franken-build` | Build stage and CI: the same PHP with Composer, git and a shell |
 | `1x.ax/mamluk/enterprise/php/8.5:franken-build-8.5.11` | The build image, pinned to a PHP release |
+| `1x.ax/mamluk/enterprise/php/8.5:franken-alpine` | The runtime on Alpine, for APIs that need to add programs (see [Adding programs](#adding-programs)) |
+| `1x.ax/mamluk/enterprise/php/8.5:franken-alpine-8.5.11` | The Alpine variant, pinned to a PHP release |
 | `1x.ax/mamluk/enterprise/php/8.4:...` | The same for PHP 8.4 |
 
 ## Extensions
@@ -80,7 +84,7 @@ checks files for changes (`opcache.validate_timestamps = 0`), because they canno
   string to serve without a worker.
 * **No programs to run.** `exec`, `shell_exec`, `system`, `passthru`, `popen`, `proc_open` and `pcntl_exec` are
   disabled, because there is nothing for them to run. The [Git driver](https://kipchak.dev/docs/driver-git)
-  needs the `git` program and does not work in this image.
+  needs the `git` program and does not work in this image; use the Alpine variant.
 * **The admin API is off.** The configuration never changes in a running container. Set `CADDY_ADMIN` to
   `localhost:2019` and `CADDY_GLOBAL_OPTIONS` to `metrics` for Prometheus metrics.
 * **Plain HTTP, with HTTP/2.** TLS ends at your load balancer or ingress. The server speaks HTTP/1.1 and
@@ -88,13 +92,43 @@ checks files for changes (`opcache.validate_timestamps = 0`), because they canno
 * **No Mercure or Vulcain.** Caddy is built with only the modules an API needs.
 * **No JIT.** OPcache's JIT is not available in musl builds. OPcache itself is.
 
+### Adding programs
+
+The `franken-alpine` variant is the same binary, with the same settings and the same non-root user, on Alpine
+Linux. Alpine adds a shell and its package manager, so programs can be installed:
+
+```dockerfile
+FROM 1x.ax/mamluk/enterprise/php/8.5:franken-alpine
+
+USER root
+RUN apk add --no-cache git
+USER 65532
+
+COPY --from=build /var/www /var/www
+```
+
+The functions that start programs (`exec`, `proc_open` and the others) are enabled in this variant, by
+`/etc/frankenphp/php.d/00-alpine.ini`. Everything else is as in the runtime image,
+including the read-only filesystem and the restrictive Kubernetes settings below.
+
+Use it only when an API needs a program. Each package installed is software to patch, and a shell is a tool for an
+attacker. Extensions still cannot be added: they are compiled into the binary.
+
 ### Command-line scripts
 
-Run PHP scripts, such as migrations or queue consumers, with FrankenPHP's CLI:
+Run PHP scripts, such as migrations or queue consumers, with the `php` CLI in the image. The image's entrypoint
+is `frankenphp`, so name `php` as the entrypoint, or as the `command` of a Kubernetes container or Job:
 
 ```bash
-docker run --rm my-api php-cli /var/www/bin/console migrations:up
+docker run --rm --entrypoint php my-api /var/www/bin/console migrations:up
 ```
+
+```yaml
+command: ["php", "/var/www/bin/console", "migrations:up"]
+```
+
+Use `php` rather than `frankenphp php-cli`: before PHP 8.6, `frankenphp php-cli` puts its own path in `$argv[0]`,
+so scripts that read their arguments, such as Composer and Symfony Console, misread them.
 
 ### Kubernetes
 

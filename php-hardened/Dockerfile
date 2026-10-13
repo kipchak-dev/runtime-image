@@ -2,10 +2,12 @@
 #
 # Hardened PHP runtime for Kipchak: a static FrankenPHP binary on an empty filesystem.
 #
-#   runtime (default)  FROM scratch: the frankenphp binary, CA certificates, php.ini, a Caddyfile and a non-root
-#                      user. No shell, no package manager, no libc, nothing else to patch or exploit.
+#   runtime (default)  FROM scratch: the frankenphp binary, the php CLI for console scripts, CA certificates, php.ini,
+#                      a Caddyfile and a non-root user. No shell, no package manager, no libc.
 #   build              the same binary, plus a php CLI built with the same extensions, Composer and git on Debian,
 #                      for the build stage of an API's Dockerfile and for CI.
+#   alpine             the runtime's binary and settings on Alpine, for APIs that need to add programs (git, for
+#                      the Git driver) with apk.
 #
 # PHP_VERSION is required: the exact release, e.g. 8.5.11. ./build.sh and the Concourse pipeline look up the latest
 # release of each PHP version on php.net and pass it in. See README.md.
@@ -54,7 +56,7 @@ RUN mkdir -p /rootfs/etc/ssl/certs /rootfs/etc/frankenphp/php.d /rootfs/usr/loca
 
 COPY etc/frankenphp/ /rootfs/etc/frankenphp/
 COPY var/www/html/index.php /rootfs/var/www/html/index.php
-COPY --from=binary /out/frankenphp /rootfs/usr/local/bin/frankenphp
+COPY --from=binary /out/frankenphp /out/php /rootfs/usr/local/bin/
 COPY --from=binary /out/build-info.txt /out/extensions.txt /out/sources.txt /out/sources.lock.json \
 	/rootfs/usr/share/kipchak-runtime/
 
@@ -76,6 +78,45 @@ ENV COMPOSER_ALLOW_SUPERUSER=1
 WORKDIR /var/www
 
 
+# The runtime's binary and settings on Alpine, for APIs that need to add programs such as git. The binary is static
+# and uses nothing from Alpine; Alpine provides a shell and a package manager. The functions that start programs
+# are enabled, because here there are programs to start.
+FROM alpine:3.24 AS alpine
+
+ARG PHP_VERSION
+ARG FRANKENPHP_VERSION
+
+RUN apk upgrade --no-cache \
+	&& addgroup -g 65532 nonroot \
+	&& adduser -u 65532 -G nonroot -D -H -h /home/nonroot -s /sbin/nologin nonroot
+
+COPY --from=rootfs /rootfs/usr/local/bin/ /usr/local/bin/
+COPY --from=rootfs /rootfs/etc/frankenphp/ /etc/frankenphp/
+COPY --from=rootfs /rootfs/var/www/ /var/www/
+COPY --from=rootfs /rootfs/usr/share/kipchak-runtime/ /usr/share/kipchak-runtime/
+COPY etc/alpine/alpine.ini /etc/frankenphp/php.d/00-alpine.ini
+
+LABEL org.opencontainers.image.title="Kipchak Runtime (Alpine)" \
+	org.opencontainers.image.description="Hardened FrankenPHP ${FRANKENPHP_VERSION} with PHP ${PHP_VERSION} for Kipchak APIs, on Alpine" \
+	org.opencontainers.image.vendor="Mamluk" \
+	org.opencontainers.image.url="https://kipchak.dev"
+
+ENV SERVER_ROOT=/var/www/html \
+	SERVER_NAME=:8080 \
+	FRANKENPHP_CONFIG="worker /var/www/html/index.php" \
+	XDG_CONFIG_HOME=/tmp/caddy/config \
+	XDG_DATA_HOME=/tmp/caddy/data \
+	SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+USER 65532:65532
+WORKDIR /var/www/html
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/frankenphp"]
+CMD ["run", "--config", "/etc/frankenphp/Caddyfile"]
+
+
+# The default target, and the last stage, so that a plain docker build produces it.
 FROM scratch AS runtime
 
 ARG PHP_VERSION

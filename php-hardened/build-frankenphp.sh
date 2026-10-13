@@ -3,12 +3,13 @@
 # Builds a fully static FrankenPHP binary (musl, mimalloc) and a matching static PHP CLI with static-php-cli.
 #
 # Runs inside dunglas/frankenphp:static-builder-musl-<version>, whose /go/src/app holds the FrankenPHP source at
-# that version and the toolchain. This follows FrankenPHP's own build-static.sh, with four differences:
+# that version and the toolchain. This follows FrankenPHP's own build-static.sh, with three differences:
 #
 #  - static-php-cli is pinned to a commit (SPC_COMMIT) instead of tracking its nightly build;
 #  - every library is compiled here from source, never downloaded pre-built;
 #  - Mercure and Vulcain are left out of Caddy, so the server carries only the modules an API needs;
-#  - a standalone php CLI is built alongside, for Composer and CI in the build image.
+#  - a standalone php CLI is built alongside. `frankenphp php-cli` cannot replace it before PHP 8.6: it puts its
+#    own path in $argv[0], so Composer and console scripts misread their arguments.
 
 set -euo pipefail
 
@@ -31,7 +32,29 @@ fi
 export SPC_LIBC=musl
 export SPC_DEFAULT_C_FLAGS="-fPIC -O2"
 export SPC_CMD_VAR_PHP_MAKE_EXTRA_CFLAGS="-fPIE -fstack-protector-strong -O2 -w -s"
-export SPC_CMD_VAR_PHP_MAKE_EXTRA_LDFLAGS_PROGRAM="-Wl,-O1 -Wl,-z,relro -Wl,-z,now -pie"
+# Applied to the php CLI's link (static-php-cli fixes the rest of that link line itself): relro and now make the
+# relocated data read-only.
+export SPC_CMD_VAR_PHP_MAKE_EXTRA_LDFLAGS="-Wl,-z,relro -Wl,-z,now"
+
+# PHP links its CLI with --export-dynamic, for loading extensions at run time, which a static binary cannot do. On
+# x86_64 that leaves two thread-local storage relocations from libstdc++'s std::call_once (__once_callable,
+# __once_call) to be applied at run time, which musl never does in a static-pie binary, so ICU (intl) crashes on
+# first use. libtool adds the flag after any we pass, so this gcc wrapper removes it from that one link.
+mkdir -p /opt/spc-wrap
+cat > /opt/spc-wrap/gcc <<'EOF'
+#!/bin/sh
+case " $* " in
+	*" -o sapi/cli/php "*)
+		for a in "$@"; do
+			shift
+			[ "$a" = "-Wl,--export-dynamic" ] || [ "$a" = "-rdynamic" ] || set -- "$@" "$a"
+		done
+		;;
+esac
+exec /usr/bin/gcc "$@"
+EOF
+chmod 755 /opt/spc-wrap/gcc
+export PATH="/opt/spc-wrap:${PATH}"
 export SPC_CMD_VAR_FRANKENPHP_XCADDY_MODULES="--with github.com/dunglas/caddy-cbrotli"
 CGO_CFLAGS="${CGO_CFLAGS:-} $(sh "${FRANKENPHP_SOURCE_PATH}/mtls-cflags.sh")"
 export CGO_CFLAGS
