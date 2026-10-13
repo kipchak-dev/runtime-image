@@ -1,0 +1,48 @@
+# Caddyfile for the hardened Kipchak runtime.
+#
+# https://frankenphp.dev/docs/config
+# https://caddyserver.com/docs/caddyfile
+#
+# Copy this file into your API and adjust it, or override these environment variables:
+#
+#   SERVER_NAME                     the address to listen on (default :8080; the runtime is not root, so use a port above 1023)
+#   SERVER_ROOT                     the document root (default /var/www/html)
+#   FRANKENPHP_CONFIG               frankenphp directives (default: worker /var/www/html/index.php)
+#   CADDY_ADMIN                     the admin API address, or off (default off; the configuration never changes at runtime)
+#   CADDY_GLOBAL_OPTIONS            extra global options, e.g. "metrics"
+#   CADDY_SERVER_EXTRA_DIRECTIVES   extra directives for the site
+{
+	skip_install_trust
+	auto_https off
+	persist_config off
+	# No certificates are managed here: TLS ends at the load balancer or ingress.
+	storage_check off
+	storage_clean_interval off
+	admin {$CADDY_ADMIN:off}
+
+	log {
+		format json
+	}
+
+	# Plain HTTP behind the ingress, with HTTP/2 for clients and proxies that use it without TLS.
+	servers {
+		protocols h1 h2c
+	}
+
+	{$CADDY_GLOBAL_OPTIONS}
+
+	frankenphp {
+		{$FRANKENPHP_CONFIG}
+	}
+}
+
+{$CADDY_EXTRA_CONFIG}
+
+{$SERVER_NAME::8080} {
+	root {$SERVER_ROOT:/var/www/html}
+	encode zstd br gzip
+
+	{$CADDY_SERVER_EXTRA_DIRECTIVES}
+
+	php_server
+}
