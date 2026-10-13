@@ -75,6 +75,11 @@ git fetch --quiet --depth 1 https://github.com/crazywhalecc/static-php-cli "${SP
 git checkout --quiet FETCH_HEAD
 composer install --no-dev --classmap-authoritative --no-interaction --quiet
 
+# GNU sources from ftpmirror.gnu.org, which redirects to a nearby mirror, as GNU recommends: ftp.gnu.org itself is
+# often unavailable, and static-php-cli then waits two minutes per attempt.
+sed -i 's#https://ftp.gnu.org/pub/gnu/#https://ftpmirror.gnu.org/gnu/#g; s#https://ftp.gnu.org/gnu/#https://ftpmirror.gnu.org/gnu/#g' \
+	config/source.json
+
 spc=./bin/spc
 ${spc} doctor --auto-fix
 ${spc} install-pkg go-xcaddy
