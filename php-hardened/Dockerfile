@@ -13,6 +13,8 @@
 # release of each PHP version on php.net and pass it in. See README.md.
 
 ARG FRANKENPHP_VERSION=1.13.0
+# Where the build and alpine images take the runtime from: the runtime stage, or an image built from it.
+ARG RUNTIME_SOURCE=runtime
 
 FROM dunglas/frankenphp:static-builder-musl-${FRANKENPHP_VERSION} AS binary
 
@@ -61,62 +63,7 @@ COPY --from=binary /out/build-info.txt /out/extensions.txt /out/sources.txt /out
 	/rootfs/usr/share/kipchak-runtime/
 
 
-# For an API's build stage and for CI: Composer resolves platform requirements against exactly the extensions
-# the runtime has.
-FROM debian:trixie-slim AS build
-
-RUN apt-get update \
-	&& apt-get install -y --no-install-recommends ca-certificates git unzip \
-	&& rm -rf /var/lib/apt/lists/*
-
-COPY --from=binary /out/frankenphp /out/php /usr/local/bin/
-COPY --from=rootfs /rootfs/usr/share/kipchak-runtime/ /usr/share/kipchak-runtime/
-COPY --from=composer/composer:2-bin /composer /usr/local/bin/composer
-COPY etc/build/php.ini /etc/frankenphp/php.ini
-
-ENV COMPOSER_ALLOW_SUPERUSER=1
-WORKDIR /var/www
-
-
-# The runtime's binary and settings on Alpine, for APIs that need to add programs such as git. The binary is static
-# and uses nothing from Alpine; Alpine provides a shell and a package manager. The functions that start programs
-# are enabled, because here there are programs to start.
-FROM alpine:3.24 AS alpine
-
-ARG PHP_VERSION
-ARG FRANKENPHP_VERSION
-
-RUN apk upgrade --no-cache \
-	&& addgroup -g 65532 nonroot \
-	&& adduser -u 65532 -G nonroot -D -H -h /home/nonroot -s /sbin/nologin nonroot
-
-COPY --from=rootfs /rootfs/usr/local/bin/ /usr/local/bin/
-COPY --from=rootfs /rootfs/etc/frankenphp/ /etc/frankenphp/
-COPY --from=rootfs /rootfs/var/www/ /var/www/
-COPY --from=rootfs /rootfs/usr/share/kipchak-runtime/ /usr/share/kipchak-runtime/
-COPY etc/alpine/alpine.ini /etc/frankenphp/php.d/00-alpine.ini
-
-LABEL org.opencontainers.image.title="Kipchak Runtime (Alpine)" \
-	org.opencontainers.image.description="Hardened FrankenPHP ${FRANKENPHP_VERSION} with PHP ${PHP_VERSION} for Kipchak APIs, on Alpine" \
-	org.opencontainers.image.vendor="Mamluk" \
-	org.opencontainers.image.url="https://kipchak.dev"
-
-ENV SERVER_ROOT=/var/www/html \
-	SERVER_NAME=:8080 \
-	FRANKENPHP_CONFIG="worker /var/www/html/index.php" \
-	XDG_CONFIG_HOME=/tmp/caddy/config \
-	XDG_DATA_HOME=/tmp/caddy/data \
-	SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
-
-USER 65532:65532
-WORKDIR /var/www/html
-EXPOSE 8080
-
-ENTRYPOINT ["/usr/local/bin/frankenphp"]
-CMD ["run", "--config", "/etc/frankenphp/Caddyfile"]
-
-
-# The default target, and the last stage, so that a plain docker build produces it.
+# The runtime image.
 FROM scratch AS runtime
 
 ARG PHP_VERSION
@@ -143,3 +90,68 @@ EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/frankenphp"]
 CMD ["run", "--config", "/etc/frankenphp/Caddyfile"]
+
+
+# The build and alpine images take their binaries and settings from a runtime image: by default the one built
+# above. The pipeline builds the runtime image for both architectures first and passes it in as RUNTIME_SOURCE, so
+# the binaries are compiled once.
+FROM ${RUNTIME_SOURCE} AS runtime-source
+
+
+# For an API's build stage and for CI: Composer resolves platform requirements against exactly the extensions
+# the runtime has.
+FROM debian:trixie-slim AS build
+
+RUN apt-get update \
+	&& apt-get install -y --no-install-recommends ca-certificates git unzip \
+	&& rm -rf /var/lib/apt/lists/*
+
+COPY --from=runtime-source /usr/local/bin/frankenphp /usr/local/bin/php /usr/local/bin/
+COPY --from=runtime-source /usr/share/kipchak-runtime/ /usr/share/kipchak-runtime/
+COPY --from=composer/composer:2-bin /composer /usr/local/bin/composer
+COPY etc/build/php.ini /etc/frankenphp/php.ini
+
+ENV COMPOSER_ALLOW_SUPERUSER=1
+WORKDIR /var/www
+
+
+# The runtime's binary and settings on Alpine, for APIs that need to add programs such as git. The binary is static
+# and uses nothing from Alpine; Alpine provides a shell and a package manager. The functions that start programs
+# are enabled, because here there are programs to start.
+FROM alpine:3.24 AS alpine
+
+ARG PHP_VERSION
+ARG FRANKENPHP_VERSION
+
+RUN apk upgrade --no-cache \
+	&& addgroup -g 65532 nonroot \
+	&& adduser -u 65532 -G nonroot -D -H -h /home/nonroot -s /sbin/nologin nonroot
+
+COPY --from=runtime-source /usr/local/bin/ /usr/local/bin/
+COPY --from=runtime-source /etc/frankenphp/ /etc/frankenphp/
+COPY --from=runtime-source /var/www/ /var/www/
+COPY --from=runtime-source /usr/share/kipchak-runtime/ /usr/share/kipchak-runtime/
+COPY etc/alpine/alpine.ini /etc/frankenphp/php.d/00-alpine.ini
+
+LABEL org.opencontainers.image.title="Kipchak Runtime (Alpine)" \
+	org.opencontainers.image.description="Hardened FrankenPHP ${FRANKENPHP_VERSION} with PHP ${PHP_VERSION} for Kipchak APIs, on Alpine" \
+	org.opencontainers.image.vendor="Mamluk" \
+	org.opencontainers.image.url="https://kipchak.dev"
+
+ENV SERVER_ROOT=/var/www/html \
+	SERVER_NAME=:8080 \
+	FRANKENPHP_CONFIG="worker /var/www/html/index.php" \
+	XDG_CONFIG_HOME=/tmp/caddy/config \
+	XDG_DATA_HOME=/tmp/caddy/data \
+	SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+USER 65532:65532
+WORKDIR /var/www/html
+EXPOSE 8080
+
+ENTRYPOINT ["/usr/local/bin/frankenphp"]
+CMD ["run", "--config", "/etc/frankenphp/Caddyfile"]
+
+
+# The default target, and the last stage, so that a plain docker build produces the runtime image.
+FROM runtime AS default
