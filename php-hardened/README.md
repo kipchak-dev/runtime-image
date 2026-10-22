@@ -168,8 +168,9 @@ Add `.ini` files to `/etc/frankenphp/php.d/`, or use `php_ini` in the Caddyfile,
   extension. The first build of each ISO week (`SOURCES_EPOCH`, e.g. `2026-W41`) downloads them all again and
   compiles from scratch; later builds that week reuse that binary. A security release of OpenSSL, curl or any
   other library is therefore in the images within a week. The build log lists every version.
-* **Pinned.** FrankenPHP and static-php-cli are pinned in `Dockerfile`; update them deliberately. A new FrankenPHP
-  release changes `FRANKENPHP_VERSION`, and usually needs a newer `SPC_COMMIT`. A few of static-php-cli's recipes
+* **Pinned.** FrankenPHP and static-php-cli (v3) are pinned in `Dockerfile`; update them deliberately. A new
+  FrankenPHP release changes `FRANKENPHP_VERSION` and `FRANKENPHP_BUILDER` (its static builder image, by digest),
+  and usually needs a newer `SPC_COMMIT`. A few of static-php-cli's recipes
   pin a version themselves (SQLite and protobuf, for example), and change only with `SPC_COMMIT`.
 
 ## Building

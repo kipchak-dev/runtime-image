@@ -12,16 +12,20 @@
 # PHP_VERSION is required: the exact release, e.g. 8.5.11. ./build.sh and the Concourse pipeline look up the latest
 # release of each PHP version on php.net and pass it in. See README.md.
 
-ARG FRANKENPHP_VERSION=1.13.0
+ARG FRANKENPHP_VERSION=1.13.2
+# FrankenPHP's static builder for that release: an AlmaLinux 8 toolchain image holding the FrankenPHP source in
+# /go/src/app. Pinned by digest because 1.13.2 was published only as static-builder-musl, without the
+# static-builder-musl-1.13.2 tag; its labels give version 1.13.2, revision 0ad8a403 (the v1.13.2 tag).
+ARG FRANKENPHP_BUILDER=dunglas/frankenphp:static-builder-musl@sha256:c2db90161dbc00a93fac80a73059b1ca7e7aa9a4c9cbaa70d663ad47f572b795
 # Where the build and alpine images take the runtime from: the runtime stage, or an image built from it.
 ARG RUNTIME_SOURCE=runtime
 
-FROM dunglas/frankenphp:static-builder-musl-${FRANKENPHP_VERSION} AS binary
+FROM ${FRANKENPHP_BUILDER} AS binary
 
 ARG PHP_VERSION
-# static-php-cli, pinned so that a rebuild uses the same build recipes. Most of its recipes fetch the latest release
-# of a library, so the libraries themselves are refreshed with SOURCES_EPOCH.
-ARG SPC_COMMIT=956fa13e7c390e3127cc0343215c00491f13a835
+# static-php-cli v3, pinned so that a rebuild uses the same build recipes. Most of its recipes fetch the latest
+# release of a library, so the libraries themselves are refreshed with SOURCES_EPOCH.
+ARG SPC_COMMIT=594e6439f4378ae02f3a70926e19d84992702535
 ARG PHP_EXTENSIONS=apcu,bcmath,calendar,ctype,curl,dom,exif,fileinfo,filter,gd,gettext,gmp,iconv,igbinary,intl,ldap,mbregex,mbstring,memcached,mysqli,mysqlnd,opcache,openssl,password-argon2,pcntl,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,protobuf,rdkafka,redis,session,simplexml,sockets,sodium,sqlite3,sysvmsg,sysvsem,sysvshm,tidy,tokenizer,xml,xmlreader,xmlwriter,xsl,yaml,zip,zlib,zstd
 ARG PHP_EXTENSION_LIBS=nghttp2
 # 1 to replace musl's allocator, which is slow with threads, with mimalloc.
