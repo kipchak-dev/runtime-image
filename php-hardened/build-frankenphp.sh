@@ -31,9 +31,12 @@ if [ "${MIMALLOC:-1}" = "1" ]; then
 fi
 
 # A fully static musl binary, built with static-php-cli's zig toolchain. The target is resolved when spc starts,
-# before craft.yml is read, so it has to be in the environment.
+# before craft.yml is read, so it has to be in the environment. It names the architecture rather than "native":
+# for a native target, zig compiles for the build machine's CPU, and the arm64 build runs under QEMU, whose CPU
+# has features that real arm64 machines such as Apple silicon lack, so php and frankenphp died with SIGILL there.
+# A named architecture compiles for its baseline, as static-php-cli does by default.
 unset SPC_LIBC
-export SPC_TARGET=native-native-musl
+export SPC_TARGET="$(uname -m)-linux-musl"
 # zig opens many file descriptors when a lot of extensions are linked statically.
 ulimit -n 8192 2> /dev/null || true
 
