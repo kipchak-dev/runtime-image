@@ -59,6 +59,47 @@ composer install --no-dev --classmap-authoritative --no-interaction --quiet
 grep -rlZ 'https://ftp.gnu.org/' config | xargs -0 -r sed -i \
 	's#https://ftp.gnu.org/pub/gnu/#https://ftpmirror.gnu.org/gnu/#g; s#https://ftp.gnu.org/gnu/#https://ftpmirror.gnu.org/gnu/#g'
 
+# The SQLite recipe names a fixed 2024 release: see the Dockerfile. Failing here if the recipe has moved, rather than
+# quietly building whatever it now names.
+: "${SQLITE_VERSION:?SQLITE_VERSION is required}" "${SQLITE_ARCHIVE:?SQLITE_ARCHIVE is required}" "${SQLITE_SHA3:?SQLITE_SHA3 is required}"
+grep -q 'https://www.sqlite.org/2024/sqlite-autoconf-3450200.tar.gz' config/pkg/lib/sqlite.yml \
+	|| { echo 'static-php-cli changed its SQLite recipe: review the override in build-frankenphp.sh' >&2; exit 1; }
+sed -i "s#https://www.sqlite.org/2024/sqlite-autoconf-3450200.tar.gz#https://www.sqlite.org/${SQLITE_ARCHIVE}#" config/pkg/lib/sqlite.yml
+# SQLite's current configure (autosetup) rejects options it does not know, and static-php-cli passes --with-pic to every
+# library.
+# Position-independent code still has to reach the static binary, so it goes in through the flags. So does dbstat, which
+# breaks a database down by table and index, and which after-compile.sh checks with a real query.
+grep -q "'CFLAGS' => '-DSQLITE_ENABLE_COLUMN_METADATA=1'," src/Package/Library/sqlite.php && grep -q -- '->configure()' src/Package/Library/sqlite.php \
+	|| { echo 'static-php-cli changed its SQLite build: review the override in build-frankenphp.sh' >&2; exit 1; }
+sed -i -e "s/'CFLAGS' => '-DSQLITE_ENABLE_COLUMN_METADATA=1',/'CFLAGS' => '-DSQLITE_ENABLE_COLUMN_METADATA=1 -DSQLITE_ENABLE_DBSTAT_VTAB=1 -fPIC',/" \
+	-e "s/->configure()/->removeConfigureArgs('--with-pic', '--enable-pic')->configure()/" src/Package/Library/sqlite.php
+
+# ICU renamed its source archive at 78 (icu4c-78.3-sources.tgz), and the recipe still looks for -src.tgz, so it finds
+# nothing newer than 77.1 and reports that as the latest. check-sources.php now catches this kind of thing.
+grep -qF 'match: icu4c.+-src\.tgz' config/pkg/lib/icu.yml \
+	|| { echo 'static-php-cli changed its ICU recipe: review the override in build-frankenphp.sh' >&2; exit 1; }
+sed -i 's/match: icu4c\.+-src\\\.tgz/match: icu4c.+-sources\\.tgz/' config/pkg/lib/icu.yml
+grep -qF 'match: icu4c.+-sources\.tgz' config/pkg/lib/icu.yml \
+	|| { echo 'The ICU override did not apply.' >&2; exit 1; }
+
+# Off go-jose/v3 (see the Dockerfile). xcaddy builds the FrankenPHP module from this directory, and Go takes the highest
+# version any module requires, so requiring these here is what reaches the binary.
+: "${STEP_CRYPTO_VERSION:?STEP_CRYPTO_VERSION is required}" "${STEP_CERTIFICATES_VERSION:?STEP_CERTIFICATES_VERSION is required}"
+mkdir -p /out
+if ! grep -q 'github.com/go-jose/go-jose/v3 ' "${FRANKENPHP_SOURCE_PATH}/caddy/go.mod"; then
+	# The sources report carries this, and the pipeline's guard alerts on it.
+	echo 'NOTICE: FrankenPHP no longer needs go-jose/v3 by itself: remove the pins in the Dockerfile.'
+	touch /out/go-pins-unnecessary
+fi
+(
+	cd "${FRANKENPHP_SOURCE_PATH}/caddy"
+	/opt/spc-pkgroot/go-xcaddy/bin/go get "go.step.sm/crypto@${STEP_CRYPTO_VERSION}" "github.com/smallstep/certificates@${STEP_CERTIFICATES_VERSION}"
+	/opt/spc-pkgroot/go-xcaddy/bin/go mod tidy
+)
+
+# The guard's own tests: it must fail when it should, before hours of compiling rest on it.
+php /usr/local/bin/tests/check-sources-test.php > /dev/null
+
 # What to build. PHP_VERSION is the exact release, so static-php-cli downloads that tarball from php.net and checks
 # it against php.net's SHA-256. The FrankenPHP source is the builder image's, not the latest GitHub release.
 cat > craft.yml <<EOF
@@ -107,6 +148,7 @@ fi
 
 mkdir -p /out
 cp buildroot/bin/frankenphp buildroot/bin/php /out/
+
 /out/frankenphp build-info > /out/build-info.txt
 # Both binaries must be the FrankenPHP and PHP releases asked for, e.g. "FrankenPHP v1.13.2 PHP 8.5.12 Caddy ...".
 version="$(/out/frankenphp version)"
@@ -123,7 +165,9 @@ esac || { echo "Expected FrankenPHP ${FRANKENPHP_VERSION} and PHP ${PHP_VERSION}
 # (most library filenames include the version). The build log shows both.
 /out/php -n -r 'foreach (get_loaded_extensions() as $e) { echo $e, " ", phpversion($e) ?: "", PHP_EOL; }' \
 	| sort -f > /out/extensions.txt
-cp downloads/.cache.json /out/sources.lock.json
+# The download cache remembers whatever it has ever fetched, so an extension no longer built must not be recorded as a source.
+jq --arg extensions "${PHP_EXTENSIONS}" '($extensions | split(",") | map("ext-" + .)) as $built
+	| with_entries(select((.key | startswith("ext-") | not) or (.key | IN($built[]))))' downloads/.cache.json > /out/sources.lock.json
 jq -r 'to_entries[] | select(.value.source != null)
 	| "\(.key) \(.value.source.filename // .value.source.dirname // .value.source.cache_type)"' \
 	/out/sources.lock.json | sort > /out/sources.txt
@@ -131,3 +175,19 @@ echo "--- Extensions"
 cat /out/extensions.txt
 echo "--- Sources"
 cat /out/sources.txt
+
+# Keep this step's layer to what is still read. Later stages copy only /out, and after-compile.sh needs static-php-cli itself,
+# the licence files in source/ and the Go toolchain, which is the builder image's. The downloads are on their cache mount.
+go=/opt/spc-pkgroot/go-xcaddy/bin/go
+go_caches="$("${go}" env GOMODCACHE) $("${go}" env GOCACHE)"
+echo "--- Before trimming"
+# shellcheck disable=SC2086
+du -sh source buildroot pkgroot log ${go_caches} 2> /dev/null || true
+# shellcheck disable=SC2086
+chmod -R u+w ${go_caches} 2> /dev/null || true
+# shellcheck disable=SC2086
+rm -rf buildroot pkgroot log ${go_caches}
+find source -type f ! \( -iname '*LICEN[CS]E*' -o -iname 'COPY*' -o -iname 'NOTICE*' \) -delete
+find source -type d -empty -delete
+echo "--- After trimming"
+du -sh source . 2> /dev/null || true

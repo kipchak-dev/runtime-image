@@ -31,9 +31,11 @@ library once a week (see [Updates](#updates)), and each image lists the versions
 
 ## Extensions
 
-The extensions are compiled in and cannot be added later. They are:
+The extensions are compiled in and cannot be added later. igbinary is not among them: its latest stable release does not
+compile against PHP 8.5, and a release candidate has no place in this image. `redis` and `memcached` are therefore built
+without that serialiser. It can return when upstream publishes a stable release for PHP 8.5. They are:
 
-apcu, bcmath, calendar, ctype, curl, dom, exif, fileinfo, filter, gd, gettext, gmp, iconv, igbinary, intl, ldap,
+apcu, bcmath, calendar, ctype, curl, dom, exif, fileinfo, filter, gd, gettext, gmp, iconv, intl, ldap,
 mbregex, mbstring, memcached, mysqli, mysqlnd, opcache, openssl, password-argon2, pcntl, pdo, pdo_mysql,
 pdo_pgsql, pdo_sqlite, pgsql, phar, posix, protobuf, **rdkafka**, redis, session, simplexml, sockets, sodium,
 sqlite3, sysvmsg, sysvsem, sysvshm, tidy, tokenizer, xml, xmlreader, xmlwriter, xsl, yaml, zip, zlib, zstd.
@@ -168,10 +170,39 @@ Add `.ini` files to `/etc/frankenphp/php.d/`, or use `php_ini` in the Caddyfile,
   extension. The first build of each ISO week (`SOURCES_EPOCH`, e.g. `2026-W41`) downloads them all again and
   compiles from scratch; later builds that week reuse that binary. A security release of OpenSSL, curl or any
   other library is therefore in the images within a week. The build log lists every version.
-* **Pinned.** FrankenPHP and static-php-cli (v3) are pinned in `Dockerfile`; update them deliberately. A new
+* **Pinned.** FrankenPHP, static-php-cli (v3) and SQLite are pinned in `Dockerfile`; update them deliberately. A new
   FrankenPHP release changes `FRANKENPHP_VERSION` and `FRANKENPHP_BUILDER` (its static builder image, by digest),
-  and usually needs a newer `SPC_COMMIT`. A few of static-php-cli's recipes
-  pin a version themselves (SQLite and protobuf, for example), and change only with `SPC_COMMIT`.
+  and usually needs a newer `SPC_COMMIT`. static-php-cli's SQLite recipe names a 2024 release, so the build overrides
+  it with `SQLITE_VERSION`, `SQLITE_ARCHIVE` and `SQLITE_SHA3`, checks the archive, and fails unless both binaries and
+  both drivers report that version. It also enables SQLite's `dbstat` table, and fails unless a `dbstat` query works
+  in both binaries and both drivers.
+* **go-jose.** Caddy 2.11.9 reaches `go-jose/v3`, which has a High advisory and no fix, through its internal CA. The build
+  requires `go.step.sm/crypto` 0.92.0 and `smallstep/certificates` at an unreleased commit, which use v4, and fails if v3
+  is linked. The sources report reads the commit as behind until a release has it. The guard alerts when smallstep releases past the
+  commit, or a Caddy release no longer needs v3, on the day of that release, and when FrankenPHP's own module no longer
+  needs it; remove the pins then. `x/crypto` 0.58.0 is reported by scanners for its `openpgp` package; see the release notes.
+* **What has fallen behind.** `check-sources.php` compares every library with upstream, straight after a fresh download,
+  so whatever is still behind is pinned rather than waiting for the weekly refresh. The result is in each image, at
+  `/usr/share/kipchak-runtime/sources-report.json`. The build fails on a library 18 months behind. The pipeline's
+  `sources-guard` job reads the reports daily and fails, which alerts on Talk, on a library 6 months behind, on a lookup
+  that failed, and on a report that is empty or more than 9 days old. Sources with no comparable version, such as those
+  fetched from a git branch, are listed as `no comparable version`: they have not been checked.
+
+## Licences
+
+Each image holds the licence of what is in it, in `/usr/share/kipchak-runtime/THIRD-PARTY-LICENCES/`:
+
+* `libraries/`: each library and extension compiled in, from static-php-cli's `dump-license`.
+* `go/`: each Go module linked into the binary, as the binary records them, with `MODULES.txt` listing their versions.
+* `frankenphp/` and `debian-ca-certificates/`: FrankenPHP's own, and the CA certificates'.
+* `alpine/` (Alpine image only): `PACKAGES.txt`, the installed packages and their licences, and each package's own
+  licence files from its source archive. A package whose source has no licence file gets the standard text of its
+  licence, with any notices from its file headers.
+* `composer/` (build image only). The build image's Debian packages keep theirs in `/usr/share/doc`.
+
+`LICENCE-SOURCES.txt`, beside them, says of each component whether its text is the project's original or not, and why
+not. The build fails if a library, Go module or Alpine package has no text, or if one that should have an original does
+not.
 
 ## Building
 
@@ -179,11 +210,15 @@ Concourse builds and pushes both PHP versions, for both architectures, from
 `concourse-pipelines/pipelines/mamluk/kipchak-runtime.yml`: on every commit, and daily. To build by hand:
 
 ```bash
-./build.sh            # PHP 8.4 and 8.5, both architectures, pushed with an SBOM and provenance
+./build.sh            # PHP 8.4 and 8.5, both architectures, pushed
 ./build.sh 8.5        # one version
 PUSH=0 ./build.sh 8.5 # build only
 SOURCES_EPOCH=$(date +%s) ./build.sh # refresh the libraries now, rather than at the start of the week
 ```
+
+`build.sh` also attaches an SBOM and provenance when it pushes. The pipeline, which publishes the images customers
+receive, does not: its images are signed by digest, and carry no build attestations. Their contents are recorded in
+`/usr/share/kipchak-runtime/`.
 
 A plain `docker build` needs `--build-arg PHP_VERSION=8.5.11`, the exact release.
 

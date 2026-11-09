@@ -12,11 +12,10 @@
 # PHP_VERSION is required: the exact release, e.g. 8.5.11. ./build.sh and the Concourse pipeline look up the latest
 # release of each PHP version on php.net and pass it in. See README.md.
 
-ARG FRANKENPHP_VERSION=1.13.2
+ARG FRANKENPHP_VERSION=1.13.5
 # FrankenPHP's static builder for that release: an AlmaLinux 8 toolchain image holding the FrankenPHP source in
-# /go/src/app. Pinned by digest because 1.13.2 was published only as static-builder-musl, without the
-# static-builder-musl-1.13.2 tag; its labels give version 1.13.2, revision 0ad8a403 (the v1.13.2 tag).
-ARG FRANKENPHP_BUILDER=dunglas/frankenphp:static-builder-musl@sha256:c2db90161dbc00a93fac80a73059b1ca7e7aa9a4c9cbaa70d663ad47f572b795
+# /go/src/app. Pinned by digest, so that a rebuild uses the same toolchain.
+ARG FRANKENPHP_BUILDER=dunglas/frankenphp:static-builder-musl-1.13.5@sha256:7e1a70e2f22d0b6e22e702f7665fa8b5ff7150addad541655f990b6d1db6d187
 # Where the build and alpine images take the runtime from: the runtime stage, or an image built from it.
 ARG RUNTIME_SOURCE=runtime
 
@@ -26,7 +25,18 @@ ARG PHP_VERSION
 # static-php-cli v3, pinned so that a rebuild uses the same build recipes. Most of its recipes fetch the latest
 # release of a library, so the libraries themselves are refreshed with SOURCES_EPOCH.
 ARG SPC_COMMIT=594e6439f4378ae02f3a70926e19d84992702535
-ARG PHP_EXTENSIONS=apcu,bcmath,calendar,ctype,curl,dom,exif,fileinfo,filter,gd,gettext,gmp,iconv,igbinary,intl,ldap,mbregex,mbstring,memcached,mysqli,mysqlnd,opcache,openssl,password-argon2,pcntl,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,protobuf,rdkafka,redis,session,simplexml,sockets,sodium,sqlite3,sysvmsg,sysvsem,sysvshm,tidy,tokenizer,xml,xmlreader,xmlwriter,xsl,yaml,zip,zlib,zstd
+# static-php-cli's recipe pins SQLite to a 2024 release, even at the head of its v3 branch, so the refresh never moves it
+# and build-frankenphp.sh overrides it. The version, path and SHA3-256 are from the PRODUCT row of
+# https://www.sqlite.org/download.html. check-sources.php fails the build when it falls too far behind.
+ARG SQLITE_VERSION=3.54.1
+ARG SQLITE_ARCHIVE=2026/sqlite-autoconf-3540100.tar.gz
+ARG SQLITE_SHA3=b6ced585c750916b1052667239a12c25a7ff34e7f06e1e6e01ecb0427657d9c4
+# Caddy 2.11.9 reaches go-jose/v3 through its internal CA, and v3 has a High advisory with no fix: go.step.sm/crypto 0.92.0 and
+# smallstep/certificates' master use v4 only, and the latter has no release yet. after-compile.sh fails if v3 is linked, and
+# check-sources.php reports an unreleased pin as behind, by its own age. Move to a release as soon as one exists.
+ARG STEP_CRYPTO_VERSION=v0.92.0
+ARG STEP_CERTIFICATES_VERSION=v0.30.3-0.20261105213751-6d5a251fbe01
+ARG PHP_EXTENSIONS=apcu,bcmath,calendar,ctype,curl,dom,exif,fileinfo,filter,gd,gettext,gmp,iconv,intl,ldap,mbregex,mbstring,memcached,mysqli,mysqlnd,opcache,openssl,password-argon2,pcntl,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,protobuf,rdkafka,redis,session,simplexml,sockets,sodium,sqlite3,sysvmsg,sysvsem,sysvshm,tidy,tokenizer,xml,xmlreader,xmlwriter,xsl,yaml,zip,zlib,zstd
 ARG PHP_EXTENSION_LIBS=nghttp2
 # 1 to replace musl's allocator, which is slow with threads, with mimalloc.
 ARG MIMALLOC=1
@@ -35,15 +45,27 @@ ARG MIMALLOC=1
 # release. The pipeline and ./build.sh set it to the ISO week (2026-W41), so the first build of each week refreshes
 # the libraries and later builds that week reuse the result.
 ARG SOURCES_EPOCH=local
+# Part of the download cache's name. Change it with an override of a recipe's source (SQLite, ICU), which a cache
+# holding the old archive would otherwise ignore until the next week.
+ARG SOURCES_REVISION=2
 ARG TARGETARCH
 
-COPY build-frankenphp.sh /usr/local/bin/build-frankenphp.sh
+COPY build-frankenphp.sh after-compile.sh check-sources.php /usr/local/bin/
+COPY tests/check-sources-test.php /usr/local/bin/tests/
 # Downloaded sources are cached for the epoch, so retried and repeated builds do not download them again.
 RUN --mount=type=secret,id=github_token \
-	--mount=type=cache,id=spc-sources-${TARGETARCH}-${SOURCES_EPOCH},target=/go/src/app/dist/static-php-cli/downloads,sharing=locked \
+	--mount=type=cache,id=spc-sources-${SOURCES_REVISION}-${TARGETARCH}-${SOURCES_EPOCH},target=/go/src/app/dist/static-php-cli/downloads,sharing=locked \
 	PHP_VERSION=${PHP_VERSION} SPC_COMMIT=${SPC_COMMIT} \
+	SQLITE_VERSION=${SQLITE_VERSION} SQLITE_ARCHIVE=${SQLITE_ARCHIVE} SQLITE_SHA3=${SQLITE_SHA3} \
+	STEP_CRYPTO_VERSION=${STEP_CRYPTO_VERSION} STEP_CERTIFICATES_VERSION=${STEP_CERTIFICATES_VERSION} \
 	PHP_EXTENSIONS=${PHP_EXTENSIONS} PHP_EXTENSION_LIBS=${PHP_EXTENSION_LIBS} MIMALLOC=${MIMALLOC} \
 	bash /usr/local/bin/build-frankenphp.sh
+# The checks and licences, as their own step, so that a failure here keeps the compile above.
+RUN --mount=type=secret,id=github_token \
+	--mount=type=cache,id=spc-sources-${SOURCES_REVISION}-${TARGETARCH}-${SOURCES_EPOCH},target=/go/src/app/dist/static-php-cli/downloads,sharing=locked \
+	SQLITE_VERSION=${SQLITE_VERSION} SQLITE_ARCHIVE=${SQLITE_ARCHIVE} SQLITE_SHA3=${SQLITE_SHA3} \
+	STEP_CRYPTO_VERSION=${STEP_CRYPTO_VERSION} STEP_CERTIFICATES_VERSION=${STEP_CERTIFICATES_VERSION} \
+	bash /usr/local/bin/after-compile.sh
 
 
 # The few files the runtime needs, prepared where there is a shell.
@@ -64,7 +86,10 @@ COPY etc/frankenphp/ /rootfs/etc/frankenphp/
 COPY var/www/html/index.php /rootfs/var/www/html/index.php
 COPY --from=binary /out/frankenphp /out/php /rootfs/usr/local/bin/
 COPY --from=binary /out/build-info.txt /out/extensions.txt /out/sources.txt /out/sources.lock.json \
-	/rootfs/usr/share/kipchak-runtime/
+	/out/sources-report.json /rootfs/usr/share/kipchak-runtime/
+COPY --from=binary /out/THIRD-PARTY-LICENCES/ /rootfs/usr/share/kipchak-runtime/THIRD-PARTY-LICENCES/
+RUN mkdir -p /rootfs/usr/share/kipchak-runtime/THIRD-PARTY-LICENCES/debian-ca-certificates \
+	&& cp /usr/share/doc/ca-certificates/copyright /rootfs/usr/share/kipchak-runtime/THIRD-PARTY-LICENCES/debian-ca-certificates/
 
 
 # The runtime image.
@@ -107,6 +132,7 @@ FROM ${RUNTIME_SOURCE} AS runtime-source
 FROM debian:trixie-slim AS build
 
 RUN apt-get update \
+	&& apt-get upgrade -y \
 	&& apt-get install -y --no-install-recommends ca-certificates git unzip \
 	&& rm -rf /var/lib/apt/lists/*
 
@@ -114,6 +140,11 @@ COPY --from=runtime-source /usr/local/bin/frankenphp /usr/local/bin/php /usr/loc
 COPY --from=runtime-source /usr/share/kipchak-runtime/ /usr/share/kipchak-runtime/
 COPY --from=composer/composer:2-bin /composer /usr/local/bin/composer
 COPY etc/build/php.ini /etc/frankenphp/php.ini
+# Composer's licence from inside its own archive, beside the others. Debian's packages keep theirs in /usr/share/doc.
+RUN mkdir -p /usr/share/kipchak-runtime/THIRD-PARTY-LICENCES/composer \
+	&& cp /usr/local/bin/composer /tmp/composer.phar \
+	&& php -n -r 'copy("phar:///tmp/composer.phar/LICENSE", "/usr/share/kipchak-runtime/THIRD-PARTY-LICENCES/composer/LICENSE") || exit(1);' \
+	&& rm /tmp/composer.phar
 
 ENV COMPOSER_ALLOW_SUPERUSER=1
 WORKDIR /var/www
@@ -136,6 +167,9 @@ COPY --from=runtime-source /etc/frankenphp/ /etc/frankenphp/
 COPY --from=runtime-source /var/www/ /var/www/
 COPY --from=runtime-source /usr/share/kipchak-runtime/ /usr/share/kipchak-runtime/
 COPY etc/alpine/alpine.ini /etc/frankenphp/php.d/00-alpine.ini
+COPY alpine-licences.sh /tmp/alpine-licences.sh
+# The licences of Alpine's own packages: what is installed, and the text of each licence it names.
+RUN sh /tmp/alpine-licences.sh /usr/share/kipchak-runtime/THIRD-PARTY-LICENCES/alpine && rm /tmp/alpine-licences.sh
 
 LABEL org.opencontainers.image.title="Kipchak Runtime (Alpine)" \
 	org.opencontainers.image.description="Hardened FrankenPHP ${FRANKENPHP_VERSION} with PHP ${PHP_VERSION} for Kipchak APIs, on Alpine" \
