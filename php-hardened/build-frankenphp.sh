@@ -45,14 +45,38 @@ if [ -f /run/secrets/github_token ]; then
 	export GITHUB_TOKEN
 fi
 
+# THE SOURCE SET. Every build writes to /out-set everything it fetched, at the versions it built: static-php-cli as
+# fetched, the source and toolchain archives, and the Go modules. The pipeline keeps each published build's set on
+# 1x.ax, so the binaries can be rebuilt, with a modified library if wanted, without any upstream (see NOTICE.md).
+# With a set mounted at /sources (the `sources` build context, see the README), the build takes everything from it
+# instead, and is run with --network=none, so that nothing can come from anywhere else.
+SOURCES=/sources
+SET=/out-set
+from_set() { [ -f "${SOURCES}/static-php-cli.tar.gz" ]; }
+mkdir -p "${SET}"
+# Archives written the same way every time, so the same contents give the same bytes and are stored once.
+pack() { tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner "$@" -cf - . | gzip -n; }
+
 mkdir -p "${FRANKENPHP_SOURCE_PATH}/dist/static-php-cli"
 cd "${FRANKENPHP_SOURCE_PATH}/dist/static-php-cli"
 # Start from a clean checkout and build root; only the downloaded sources are kept, in the cache mount.
 find . -mindepth 1 -maxdepth 1 ! -name downloads -exec rm -rf {} +
-git init --quiet
-git fetch --quiet --depth 1 https://github.com/crazywhalecc/static-php-cli "${SPC_COMMIT}"
-git checkout --quiet FETCH_HEAD
-composer install --no-dev --classmap-authoritative --no-interaction --quiet
+if from_set; then
+	tar -xzf "${SOURCES}/static-php-cli.tar.gz"
+	[ "$(git rev-parse HEAD)" = "${SPC_COMMIT}" ] \
+		|| { echo "The set's static-php-cli is not at SPC_COMMIT ${SPC_COMMIT}." >&2; exit 1; }
+	# The set's downloads, with static-php-cli's record of them, so that its download step finds every one in place.
+	cp -a "${SOURCES}/downloads/." downloads/
+	# The Go modules from the set alone. go.sum still checks every one of them.
+	export GOPROXY="file://${SOURCES}/gomod" GOSUMDB=off GOFLAGS=-mod=mod GOTOOLCHAIN=local
+else
+	git init --quiet
+	git fetch --quiet --depth 1 https://github.com/crazywhalecc/static-php-cli "${SPC_COMMIT}"
+	git checkout --quiet FETCH_HEAD
+	composer install --no-dev --classmap-authoritative --no-interaction --quiet
+fi
+# static-php-cli as fetched, with its Composer packages, before the overrides below: a rebuild replays them.
+pack --exclude=./downloads > "${SET}/static-php-cli.tar.gz"
 
 # GNU sources from ftpmirror.gnu.org, which redirects to a nearby mirror, as GNU recommends: ftp.gnu.org itself is
 # often unavailable, and static-php-cli then waits two minutes per attempt before trying its mirror.
@@ -102,8 +126,12 @@ php /usr/local/bin/tests/check-sources-test.php > /dev/null
 
 # What to build. PHP_VERSION is the exact release, so static-php-cli downloads that tarball from php.net and checks
 # it against php.net's SHA-256. The FrankenPHP source is the builder image's, not the latest GitHub release.
+# From a set, the php-version line is left out: with it, craft always fetches PHP again from php.net (ignore-cache:
+# php-src), and the set's tarball is the one to build. The version check after the build still requires PHP_VERSION.
+php_version_line="php-version: \"${PHP_VERSION}\""
+from_set && php_version_line="# php-version: the set's php-src (${PHP_VERSION})"
 cat > craft.yml <<EOF
-php-version: "${PHP_VERSION}"
+${php_version_line}
 extensions: "${PHP_EXTENSIONS}"
 packages: "${PHP_EXTENSION_LIBS}"
 sapi: "cli,frankenphp"
@@ -176,9 +204,50 @@ cat /out/extensions.txt
 echo "--- Sources"
 cat /out/sources.txt
 
+# The rest of the set: every download the lock names, source and this platform's binaries (zig and Go), with the lock
+# as static-php-cli's record of them; and every Go module the build fetched. FrankenPHP's own source is the builder
+# image's, which the set names by digest.
+mkdir -p "${SET}/downloads"
+platform="linux-$(uname -m)"
+jq -r --arg platform "${platform}" 'to_entries[].value
+	| (.source // {} | .filename // .dirname // empty),
+	  (if (.binary | type) == "object" then (.binary[$platform] // {} | .filename // empty) else empty end)' \
+	/out/sources.lock.json | sort -u | while read -r entry; do
+	case "${entry}" in /*) continue ;; esac
+	[ -e "downloads/${entry}" ] || { echo "The lock names ${entry}, which is not in the downloads." >&2; exit 1; }
+	cp -a "downloads/${entry}" "${SET}/downloads/"
+done
+cp /out/sources.lock.json "${SET}/downloads/.cache.json"
+# The sources of the LGPL libraries linked into both programs, which every image carries itself (NOTICE.md). libiconv's
+# archive holds libcharset too.
+mkdir -p /out/source-libraries
+for library in gettext libiconv gmp; do
+	archive="$(jq -r --arg l "${library}" '.[$l].source.filename // empty' /out/sources.lock.json)"
+	[ -n "${archive}" ] && [ -f "${SET}/downloads/${archive}" ] \
+		|| { echo "The source archive of ${library}, which NOTICE.md names, is missing." >&2; exit 1; }
+	cp "${SET}/downloads/${archive}" /out/source-libraries/
+done
+go=/opt/spc-pkgroot/go-xcaddy/bin/go
+# Two module caches: the go-jose pins above use Go's default GOPATH, and static-php-cli runs xcaddy with its own
+# (config/pkg/tool/go-xcaddy.yml).
+mkdir -p "${SET}/gomod"
+for modcache in "$("${go}" env GOMODCACHE)" "$(GOPATH=/opt/spc-pkgroot/go-xcaddy/go "${go}" env GOMODCACHE)"; do
+	[ -d "${modcache}/cache/download" ] || { echo "No Go module cache at ${modcache}" >&2; exit 1; }
+	cp -a "${modcache}/cache/download/." "${SET}/gomod/"
+done
+chmod -R u+w "${SET}"
+# Go keeps no .info for a module it fetched as a requirement, but xcaddy's `go get module@version` reads one from the
+# file proxy: write it for every version the cache holds.
+find "${SET}/gomod" -name '*.mod' -path '*/@v/*' | while read -r mod; do
+	info="${mod%.mod}.info"
+	[ -f "${info}" ] || printf '{"Version":"%s"}\n' "$(basename "${mod%.mod}")" > "${info}"
+done
+find "${SET}/gomod" -name '*.lock' -delete
+echo "--- The source set"
+du -sh "${SET}"/* 2> /dev/null || true
+
 # Keep this step's layer to what is still read. Later stages copy only /out, and after-compile.sh needs static-php-cli itself,
 # the licence files in source/ and the Go toolchain, which is the builder image's. The downloads are on their cache mount.
-go=/opt/spc-pkgroot/go-xcaddy/bin/go
 go_caches="$("${go}" env GOMODCACHE) $("${go}" env GOCACHE)"
 echo "--- Before trimming"
 # shellcheck disable=SC2086

@@ -229,3 +229,55 @@ architecture to the builder, as described in `build.sh`.
 static-php-cli downloads most library sources from GitHub, and GitHub allows 60 API requests an hour without a
 token. `build.sh` uses `GITHUB_TOKEN`, or Composer's GitHub token if that is not set; the pipeline uses
 `((github.composer_token))`. Sources are cached for the week.
+
+## Rebuilding from the source set
+
+Every build records what it was built from, and each published build's **source set** is kept on Mamluk's mirror,
+`1x.ax/mamluk/kipchak-sources`, for as long as Mamluk offers the image (`NOTICE.md`). With it, `frankenphp` and `php` can be
+rebuilt with nothing else reachable, including with a modified library. The image names its set in the
+`org.kipchak.sources` label, for example `8.5.12-20261110-arm64`.
+
+A set holds: static-php-cli at `SPC_COMMIT`, with its Composer packages; every source and toolchain archive the build
+used, with static-php-cli's record of them (`downloads/`); the Go modules (`gomod/`); the CA certificates; the
+exact Debian and Alpine source packages of the build and alpine images; `IMAGES.txt`, the images it was built with,
+by digest; and `SHA256SUMS`. The mirror also keeps those images, and the Dockerfile frontend, by the same digests.
+
+1. Fetch the set, with this recipe (in the image at `/usr/share/kipchak-runtime/source/recipe/`):
+
+   ```bash
+   ./fetch-sources.sh 8.5.12-20261110T1730-arm64 ./set   # the image's org.kipchak.sources label
+   ```
+
+2. To use a modified library, replace its archive in `set/downloads/` under the same name, and set its `hash` in
+   `set/downloads/.cache.json` to the new file's SHA-1, which is how static-php-cli recognises a download as its own.
+   For example, for libiconv:
+
+   ```bash
+   tar -czf set/downloads/libiconv-1.19.1.tar.gz libiconv-1.19.1   # your modified source
+   hash="$(sha1sum set/downloads/libiconv-1.19.1.tar.gz | cut -d' ' -f1)"
+   jq --arg h "${hash}" '.libiconv.source.hash = $h' set/downloads/.cache.json > cache.json \
+       && mv cache.json set/downloads/.cache.json
+   ```
+
+3. Build with no network for any build step (`--network=none`), the set as the `sources` context, and every image
+   from the mirror by the digests in `set/IMAGES.txt`:
+
+   ```bash
+   M=1x.ax/mamluk/kipchak-sources
+   docker buildx build --network=none --no-cache --platform linux/arm64 --target runtime \
+       --build-context sources=./set \
+       --build-arg BUILDKIT_SYNTAX=$M/dockerfile@sha256:... \
+       --build-arg FRANKENPHP_BUILDER=$M/builder@sha256:... \
+       --build-arg DEBIAN_IMAGE=$M/debian@sha256:... \
+       --build-arg ALPINE_IMAGE=$M/alpine@sha256:... \
+       --build-arg COMPOSER_IMAGE=$M/composer@sha256:... \
+       --build-arg PHP_VERSION=8.5.12 --build-arg SOURCES_EPOCH=rebuild \
+       -t my-runtime .
+   ```
+
+   With a set present, `build-frankenphp.sh` takes static-php-cli, every download and every Go module from it, and the
+   network is never tried; the build fails if anything is missing. It still runs every check of a normal build. The
+   lookups against upstream that only report how current the libraries are cannot run, and say so.
+
+The build and alpine images install packages from Debian and Alpine as they build; their exact source packages are
+in the set, in `debian/` and `alpine/`, with the aports commit of each Alpine package in `alpine/COMMITS.txt`.

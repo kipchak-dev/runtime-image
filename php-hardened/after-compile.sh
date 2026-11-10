@@ -7,6 +7,12 @@ set -euo pipefail
 FRANKENPHP_SOURCE_PATH=/go/src/app
 cd "${FRANKENPHP_SOURCE_PATH}/dist/static-php-cli"
 
+# Rebuilt from a source set (see build-frankenphp.sh): the Go licences below come from the set's modules.
+from_set() { [ -f /sources/static-php-cli.tar.gz ]; }
+if from_set; then
+	export GOPROXY=file:///sources/gomod GOSUMDB=off GOFLAGS=-mod=mod GOTOOLCHAIN=local
+fi
+
 if [ -f /run/secrets/github_token ]; then
 	GITHUB_TOKEN="$(cat /run/secrets/github_token)"
 	export GITHUB_TOKEN
@@ -45,7 +51,10 @@ fi
 echo "--- Compared with upstream"
 artifacts="$(jq -r 'to_entries[] | select(.value.source != null) | .key' /out/sources.lock.json | paste -sd, -)"
 # A failed check-update reads as failed lookups in the report, which the guard alerts on. The log says why, without the token.
-if ! ./bin/spc check-update "${artifacts}" --json --no-motd 2> /tmp/check-update.err > /tmp/check-update.json \
+if from_set; then
+	echo 'Rebuilt from a source set, so there is no upstream to compare with: the lookups read as failed.'
+	echo '{}' > /tmp/check-update.json
+elif ! ./bin/spc check-update "${artifacts}" --json --no-motd 2> /tmp/check-update.err > /tmp/check-update.json \
 	|| ! jq -e . /tmp/check-update.json > /dev/null 2>&1; then
 	echo 'check-update failed, so its lookups will read as failed:'
 	cat /tmp/check-update.err /tmp/check-update.json | sed -e "s#${GITHUB_TOKEN:-\$^}#***#g" | tail -n 20 | cut -c1-300
@@ -103,8 +112,20 @@ cp "${FRANKENPHP_SOURCE_PATH}/LICENSE" "${licences}/frankenphp/" && echo "librar
 
 # The Go modules actually linked into the binary, from the binary's own record.
 cd "${FRANKENPHP_SOURCE_PATH}/caddy"
-while read -r module version; do
-	directory="$("${go}" mod download -json "${module}@${version}" | jq -r '.Dir // empty')"
+while read -r module version replacement replacement_version; do
+	# xcaddy builds FrankenPHP from its source directory (a "=> /go/src/app (devel)" replacement): its licence is there.
+	# Another replacement module is the one compiled in, so its licence is the one to keep.
+	if [ "${replacement}" != - ] && [ "${replacement#/}" != "${replacement}" ]; then
+		# A module inside a repository (frankenphp/caddy) has the repository's licence, in the nearest directory up.
+		directory="${replacement}"
+		while [ "${directory}" != / ] && [ -z "$(find "${directory}" -maxdepth 1 -type f \( "${licence_files[@]}" \))" ]; do
+			directory="$(dirname "${directory}")"
+		done
+	else
+		if [ "${replacement}" != - ]; then module="${replacement}" version="${replacement_version}"; fi
+		directory="$("${go}" mod download -json "${module}@${version}" | jq -r '.Dir // empty')" \
+			|| { echo "Go module ${module} ${version} could not be downloaded" >&2; missing=1; continue; }
+	fi
 	target="${licences}/go/$(printf '%s' "${module}" | tr '/' '_')"
 	mkdir -p "${target}"
 	found="$(find "${directory:-/nonexistent}" -maxdepth 1 -type f \( "${licence_files[@]}" \) 2> /dev/null || true)"
@@ -116,7 +137,11 @@ while read -r module version; do
 		printf '%s %s\n' "${module}" "${version}" >> "${licences}/go/MODULES.txt"
 		echo "go ${module} original" >> "${record}"
 	fi
-done < <("${go}" version -m /out/frankenphp | awk '$1 == "dep" || $1 == "mod" { print $2, $3 }' | grep -v ' (devel)$')
+done < <("${go}" version -m /out/frankenphp | awk '
+	function flush() { if (module != "") print module, version, replacement, replacement_version; module = "" }
+	$1 == "dep" || $1 == "mod" { flush(); module = $2; version = $3; replacement = "-"; replacement_version = "-" }
+	$1 == "=>" && module != "" { replacement = $2; replacement_version = $3 }
+	END { flush() }' | grep -v '^[^ ]* (devel) - -$')
 [ -s "${licences}/go/MODULES.txt" ] || { echo 'The binary lists no Go modules.' >&2; missing=1; }
 
 printf 'Licence texts: %s original, %s not original\n' "$(grep -c ' original$' "${record}" || true)" "$(grep -vc ' original$' "${record}" || true)"

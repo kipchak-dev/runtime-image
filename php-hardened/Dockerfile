@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
 #
 # Hardened PHP runtime for Kipchak: a static FrankenPHP binary on an empty filesystem.
 #
@@ -18,6 +18,18 @@ ARG FRANKENPHP_VERSION=1.13.5
 ARG FRANKENPHP_BUILDER=dunglas/frankenphp:static-builder-musl-1.13.5@sha256:7e1a70e2f22d0b6e22e702f7665fa8b5ff7150addad541655f990b6d1db6d187
 # Where the build and alpine images take the runtime from: the runtime stage, or an image built from it.
 ARG RUNTIME_SOURCE=runtime
+# The other images the build starts from, by digest, so that a rebuild starts from the same ones. The pipeline passes
+# the digests current at the start of each ISO week, the same refresh as the libraries (SOURCES_EPOCH); these are
+# the defaults for a build outside it.
+ARG DEBIAN_IMAGE=debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+ARG ALPINE_IMAGE=alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
+ARG COMPOSER_IMAGE=composer/composer:2-bin@sha256:56a1b0a72bacd78079e3fa49a49e7bf58326365753415c99385ea2b08bded0a5
+
+# A source set to build from instead of the network: empty unless the `sources` build context names one, as a
+# rebuild from the mirror does (see the README and build-frankenphp.sh).
+FROM scratch AS sources
+
+FROM ${COMPOSER_IMAGE} AS composer
 
 FROM ${FRANKENPHP_BUILDER} AS binary
 
@@ -55,6 +67,7 @@ COPY tests/check-sources-test.php /usr/local/bin/tests/
 # Downloaded sources are cached for the epoch, so retried and repeated builds do not download them again.
 RUN --mount=type=secret,id=github_token \
 	--mount=type=cache,id=spc-sources-${SOURCES_REVISION}-${TARGETARCH}-${SOURCES_EPOCH},target=/go/src/app/dist/static-php-cli/downloads,sharing=locked \
+	--mount=type=bind,from=sources,target=/sources \
 	PHP_VERSION=${PHP_VERSION} SPC_COMMIT=${SPC_COMMIT} \
 	SQLITE_VERSION=${SQLITE_VERSION} SQLITE_ARCHIVE=${SQLITE_ARCHIVE} SQLITE_SHA3=${SQLITE_SHA3} \
 	STEP_CRYPTO_VERSION=${STEP_CRYPTO_VERSION} STEP_CERTIFICATES_VERSION=${STEP_CERTIFICATES_VERSION} \
@@ -63,17 +76,26 @@ RUN --mount=type=secret,id=github_token \
 # The checks and licences, as their own step, so that a failure here keeps the compile above.
 RUN --mount=type=secret,id=github_token \
 	--mount=type=cache,id=spc-sources-${SOURCES_REVISION}-${TARGETARCH}-${SOURCES_EPOCH},target=/go/src/app/dist/static-php-cli/downloads,sharing=locked \
+	--mount=type=bind,from=sources,target=/sources \
 	SQLITE_VERSION=${SQLITE_VERSION} SQLITE_ARCHIVE=${SQLITE_ARCHIVE} SQLITE_SHA3=${SQLITE_SHA3} \
 	STEP_CRYPTO_VERSION=${STEP_CRYPTO_VERSION} STEP_CERTIFICATES_VERSION=${STEP_CERTIFICATES_VERSION} \
 	bash /usr/local/bin/after-compile.sh
 
 
-# The few files the runtime needs, prepared where there is a shell.
-FROM debian:trixie-slim AS rootfs
+# The few files the runtime needs, prepared where there is a shell. The CA certificates come from Debian, or from the
+# source set when rebuilding from one, which holds the same bundle as data.
+FROM ${DEBIAN_IMAGE} AS rootfs
 
-RUN apt-get update \
-	&& apt-get install -y --no-install-recommends ca-certificates \
-	&& rm -rf /var/lib/apt/lists/*
+RUN --mount=type=bind,from=sources,target=/sources \
+	if [ -f /sources/ca-certificates/ca-certificates.crt ]; then \
+		mkdir -p /etc/ssl/certs /usr/share/doc/ca-certificates \
+		&& cp /sources/ca-certificates/ca-certificates.crt /etc/ssl/certs/ \
+		&& cp /sources/ca-certificates/copyright /usr/share/doc/ca-certificates/; \
+	else \
+		apt-get update \
+		&& apt-get install -y --no-install-recommends ca-certificates \
+		&& rm -rf /var/lib/apt/lists/*; \
+	fi
 
 RUN mkdir -p /rootfs/etc/ssl/certs /rootfs/etc/frankenphp/php.d /rootfs/usr/local/bin /rootfs/var/www/html \
 		/rootfs/tmp /rootfs/usr/share/kipchak-runtime \
@@ -90,6 +112,14 @@ COPY --from=binary /out/build-info.txt /out/extensions.txt /out/sources.txt /out
 COPY --from=binary /out/THIRD-PARTY-LICENCES/ /rootfs/usr/share/kipchak-runtime/THIRD-PARTY-LICENCES/
 RUN mkdir -p /rootfs/usr/share/kipchak-runtime/THIRD-PARTY-LICENCES/debian-ca-certificates \
 	&& cp /usr/share/doc/ca-certificates/copyright /rootfs/usr/share/kipchak-runtime/THIRD-PARTY-LICENCES/debian-ca-certificates/
+# What NOTICE.md says the image carries: the notice, the build recipe, and the LGPL libraries' sources as built.
+COPY NOTICE.md /rootfs/usr/share/kipchak-runtime/NOTICE.md
+COPY Dockerfile build.sh build-frankenphp.sh after-compile.sh alpine-licences.sh check-sources.php debian-sources.sh \
+	alpine-sources.sh fetch-sources.sh README.md NOTICE.md /rootfs/usr/share/kipchak-runtime/source/recipe/
+COPY tests/ /rootfs/usr/share/kipchak-runtime/source/recipe/tests/
+COPY etc/ /rootfs/usr/share/kipchak-runtime/source/recipe/etc/
+COPY var/ /rootfs/usr/share/kipchak-runtime/source/recipe/var/
+COPY --from=binary /out/source-libraries/ /rootfs/usr/share/kipchak-runtime/source/libraries/
 
 
 # The runtime image.
@@ -97,13 +127,16 @@ FROM scratch AS runtime
 
 ARG PHP_VERSION
 ARG FRANKENPHP_VERSION
+ARG SOURCES_SET=local
+ARG TARGETARCH
 
 COPY --from=rootfs /rootfs/ /
 
 LABEL org.opencontainers.image.title="Kipchak Runtime" \
 	org.opencontainers.image.description="Hardened FrankenPHP ${FRANKENPHP_VERSION} with PHP ${PHP_VERSION} for Kipchak APIs" \
 	org.opencontainers.image.vendor="Mamluk" \
-	org.opencontainers.image.url="https://kipchak.dev"
+	org.opencontainers.image.url="https://kipchak.dev" \
+	org.kipchak.sources="${SOURCES_SET}-${TARGETARCH}"
 
 ENV PATH=/usr/local/bin \
 	SERVER_ROOT=/var/www/html \
@@ -129,7 +162,7 @@ FROM ${RUNTIME_SOURCE} AS runtime-source
 
 # For an API's build stage and for CI: Composer resolves platform requirements against exactly the extensions
 # the runtime has.
-FROM debian:trixie-slim AS build
+FROM ${DEBIAN_IMAGE} AS build
 
 RUN apt-get update \
 	&& apt-get upgrade -y \
@@ -138,13 +171,18 @@ RUN apt-get update \
 
 COPY --from=runtime-source /usr/local/bin/frankenphp /usr/local/bin/php /usr/local/bin/
 COPY --from=runtime-source /usr/share/kipchak-runtime/ /usr/share/kipchak-runtime/
-COPY --from=composer/composer:2-bin /composer /usr/local/bin/composer
+COPY --from=composer /composer /usr/local/bin/composer
 COPY etc/build/php.ini /etc/frankenphp/php.ini
 # Composer's licence from inside its own archive, beside the others. Debian's packages keep theirs in /usr/share/doc.
 RUN mkdir -p /usr/share/kipchak-runtime/THIRD-PARTY-LICENCES/composer \
 	&& cp /usr/local/bin/composer /tmp/composer.phar \
 	&& php -n -r 'copy("phar:///tmp/composer.phar/LICENSE", "/usr/share/kipchak-runtime/THIRD-PARTY-LICENCES/composer/LICENSE") || exit(1);' \
 	&& rm /tmp/composer.phar
+
+ARG PHP_VERSION
+ARG SOURCES_SET=local
+ARG TARGETARCH
+LABEL org.kipchak.sources="${SOURCES_SET}-${TARGETARCH}"
 
 ENV COMPOSER_ALLOW_SUPERUSER=1
 WORKDIR /var/www
@@ -153,10 +191,12 @@ WORKDIR /var/www
 # The runtime's binary and settings on Alpine, for APIs that need to add programs such as git. The binary is static
 # and uses nothing from Alpine; Alpine provides a shell and a package manager. The functions that start programs
 # are enabled, because here there are programs to start.
-FROM alpine:3.24 AS alpine
+FROM ${ALPINE_IMAGE} AS alpine
 
 ARG PHP_VERSION
 ARG FRANKENPHP_VERSION
+ARG SOURCES_SET=local
+ARG TARGETARCH
 
 RUN apk upgrade --no-cache \
 	&& addgroup -g 65532 nonroot \
@@ -174,7 +214,8 @@ RUN sh /tmp/alpine-licences.sh /usr/share/kipchak-runtime/THIRD-PARTY-LICENCES/a
 LABEL org.opencontainers.image.title="Kipchak Runtime (Alpine)" \
 	org.opencontainers.image.description="Hardened FrankenPHP ${FRANKENPHP_VERSION} with PHP ${PHP_VERSION} for Kipchak APIs, on Alpine" \
 	org.opencontainers.image.vendor="Mamluk" \
-	org.opencontainers.image.url="https://kipchak.dev"
+	org.opencontainers.image.url="https://kipchak.dev" \
+	org.kipchak.sources="${SOURCES_SET}-${TARGETARCH}"
 
 ENV SERVER_ROOT=/var/www/html \
 	SERVER_NAME=:8080 \
@@ -189,6 +230,45 @@ EXPOSE 8080
 
 ENTRYPOINT ["/usr/local/bin/frankenphp"]
 CMD ["run", "--config", "/etc/frankenphp/Caddyfile"]
+
+
+# THE SOURCE SET of this build (see NOTICE.md and build-frankenphp.sh), which the pipeline keeps on 1x.ax: what
+# the binaries were built from, the CA bundle, and the exact Debian and Alpine source packages of the build and
+# alpine images. Built only as `--target sources-set`, never into an image that is offered.
+FROM build AS debian-sources
+COPY debian-sources.sh /tmp/debian-sources.sh
+RUN sh /tmp/debian-sources.sh /set/debian
+
+FROM alpine AS alpine-sources
+USER root
+COPY alpine-sources.sh /tmp/alpine-sources.sh
+RUN sh /tmp/alpine-sources.sh /set/alpine
+
+FROM ${ALPINE_IMAGE} AS sources-index
+ARG FRANKENPHP_BUILDER
+ARG DEBIAN_IMAGE
+ARG ALPINE_IMAGE
+ARG COMPOSER_IMAGE
+ARG PHP_VERSION
+ARG TARGETARCH
+COPY --from=binary /out-set/ /set/
+COPY --from=rootfs /etc/ssl/certs/ca-certificates.crt /usr/share/doc/ca-certificates/copyright /set/ca-certificates/
+COPY --from=debian-sources /set/debian/ /set/debian/
+COPY --from=alpine-sources /set/alpine/ /set/alpine/
+# What the set is for, the images it was built with (by digest; the mirror keeps copies), and every file's SHA-256.
+RUN printf 'php %s\narch %s\nbuilder %s\ndebian %s\nalpine %s\ncomposer %s\n' "${PHP_VERSION}" "${TARGETARCH}" \
+		"${FRANKENPHP_BUILDER}" "${DEBIAN_IMAGE}" "${ALPINE_IMAGE}" "${COMPOSER_IMAGE}" > /set/IMAGES.txt \
+	&& cd /set && find . -type f ! -name SHA256SUMS | sort | xargs sha256sum > SHA256SUMS
+# The mirror keeps each file once, shared by every set that has it. The 3,500 or so small files (Go .mod and .info, the
+# Debian and Alpine package files) go into one tar, the same bytes whenever they are, so that a set's manifest stays
+# small; fetch-sources.sh unpacks it.
+RUN apk add --no-cache -q tar \
+	&& cd /set && find . -type f -size -64k ! -name SHA256SUMS ! -name IMAGES.txt | sort > /tmp/small \
+	&& tar --mtime=@0 --owner=0 --group=0 --numeric-owner --no-recursion -cf small-files.tar -T /tmp/small \
+	&& tr '\n' '\0' < /tmp/small | xargs -0 rm && find . -type d -empty -delete
+
+FROM scratch AS sources-set
+COPY --from=sources-index /set/ /
 
 
 # The default target, and the last stage, so that a plain docker build produces the runtime image.
