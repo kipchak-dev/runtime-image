@@ -24,6 +24,14 @@ FRANKENPHP_SOURCE_PATH=/go/src/app
 # Older builder images set v1.13.0; the binary adds its own "v".
 export FRANKENPHP_VERSION="${FRANKENPHP_VERSION#v}"
 
+# This build's settings, as given, for the Dockerfile's set-check stage, which checks the set with the same ones. No
+# image copies this file.
+mkdir -p /out
+printf '%s\n' "PHP_VERSION=${PHP_VERSION}" "PHP_EXTENSIONS=${PHP_EXTENSIONS}" "PHP_EXTENSION_LIBS=${PHP_EXTENSION_LIBS}" \
+	"SPC_COMMIT=${SPC_COMMIT}" "MIMALLOC=${MIMALLOC:-1}" "SQLITE_VERSION=${SQLITE_VERSION:-}" "SQLITE_ARCHIVE=${SQLITE_ARCHIVE:-}" \
+	"SQLITE_SHA3=${SQLITE_SHA3:-}" "STEP_CRYPTO_VERSION=${STEP_CRYPTO_VERSION:-}" \
+	"STEP_CERTIFICATES_VERSION=${STEP_CERTIFICATES_VERSION:-}" "XCADDY_VERSION=${XCADDY_VERSION:-}" > /out/build.env
+
 # Brotli is required by caddy-cbrotli. mimalloc replaces musl's allocator, which is slow under ZTS (MIMALLOC=1).
 PHP_EXTENSION_LIBS="${PHP_EXTENSION_LIBS},brotli"
 if [ "${MIMALLOC:-1}" = "1" ]; then
@@ -106,6 +114,15 @@ sed -i 's/match: icu4c\.+-src\\\.tgz/match: icu4c.+-sources\\.tgz/' config/pkg/l
 grep -qF 'match: icu4c.+-sources\.tgz' config/pkg/lib/icu.yml \
 	|| { echo 'The ICU override did not apply.' >&2; exit 1; }
 
+# static-php-cli installs xcaddy from its master branch whenever the Go it downloads differs from the builder image's.
+# A source set cannot answer @master offline, and @master moves, so xcaddy is pinned (XCADDY_VERSION, in the Dockerfile).
+: "${XCADDY_VERSION:?XCADDY_VERSION is required}"
+grep -qF 'xcaddy/cmd/xcaddy@master' src/Package/Artifact/go_xcaddy.php \
+	|| { echo 'static-php-cli changed how it installs xcaddy: review the override in build-frankenphp.sh' >&2; exit 1; }
+sed -i "s#xcaddy/cmd/xcaddy@master#xcaddy/cmd/xcaddy@${XCADDY_VERSION}#" src/Package/Artifact/go_xcaddy.php
+grep -qF "xcaddy/cmd/xcaddy@${XCADDY_VERSION}" src/Package/Artifact/go_xcaddy.php \
+	|| { echo 'The xcaddy override did not apply.' >&2; exit 1; }
+
 # Off go-jose/v3 (see the Dockerfile). xcaddy builds the FrankenPHP module from this directory, and Go takes the highest
 # version any module requires, so requiring these here is what reaches the binary.
 : "${STEP_CRYPTO_VERSION:?STEP_CRYPTO_VERSION is required}" "${STEP_CERTIFICATES_VERSION:?STEP_CERTIFICATES_VERSION is required}"
@@ -165,6 +182,31 @@ craft-options:
   doctor: true
   download: true
 EOF
+
+# SET_CHECK=1 (the set-check stage of the Dockerfile, run with no network) proves the set can rebuild: everything the
+# build would download comes from it, and so do Go, xcaddy and every Go module the binary is built from. It stops there,
+# without compiling, so a set that would fail a customer's rebuild fails the pipeline before its images are published.
+if [ "${SET_CHECK:-0}" = 1 ]; then
+	from_set || { echo 'SET_CHECK needs a source set at /sources' >&2; exit 1; }
+	echo '  build: false' >> craft.yml # craft-options is the last block: check and download, but do not build
+	./bin/spc craft craft.yml
+	./bin/spc install-pkg go-xcaddy
+	go=/opt/spc-pkgroot/go-xcaddy/bin/go
+	export PATH="/opt/spc-pkgroot/go-xcaddy/bin:${PATH}" GOPATH=/opt/spc-pkgroot/go-xcaddy/go
+	# xcaddy writes the module FrankenPHP is built as, and resolves it, then stops before compiling.
+	# Its build environment goes in a directory of its own (xcaddy uses TMPDIR), so it is the only buildenv_ there.
+	work="$(mktemp -d)"
+	(cd "${work}" && TMPDIR="${work}" XCADDY_SKIP_BUILD=1 XCADDY_SKIP_CLEANUP=1 xcaddy build \
+		--with "github.com/dunglas/frankenphp=${FRANKENPHP_SOURCE_PATH}" \
+		--with "github.com/dunglas/frankenphp/caddy=${FRANKENPHP_SOURCE_PATH}/caddy" \
+		--with github.com/dunglas/caddy-cbrotli)
+	module="$(ls -d "${work}"/buildenv_* 2> /dev/null | head -n 1)"
+	[ -d "${module}" ] || { echo 'xcaddy left no build environment to check' >&2; exit 1; }
+	# Every package the binary imports, from the set's modules alone. Nothing is compiled.
+	modules="$(cd "${module}" && CGO_ENABLED=1 "${go}" list -deps -f '{{with .Module}}{{.Path}}@{{.Version}}{{end}}' . | sort -u | grep -c .)"
+	echo "The source set rebuilds offline: downloads, Go, xcaddy ${XCADDY_VERSION} and the ${modules} Go modules the binary imports."
+	exit 0
+fi
 
 if ! ./bin/spc craft craft.yml; then
 	# The build log stays inside the failed build step, so show where it went wrong.

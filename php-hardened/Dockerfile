@@ -48,6 +48,9 @@ ARG SQLITE_SHA3=b6ced585c750916b1052667239a12c25a7ff34e7f06e1e6e01ecb0427657d9c4
 # check-sources.php reports an unreleased pin as behind, by its own age. Move to a release as soon as one exists.
 ARG STEP_CRYPTO_VERSION=v0.92.0
 ARG STEP_CERTIFICATES_VERSION=v0.30.3-0.20261105213751-6d5a251fbe01
+# static-php-cli installs xcaddy from its master branch whenever its Go differs from the builder image's, and @master can
+# neither be resolved from a source set offline nor be rebuilt to the same thing later: build-frankenphp.sh pins it.
+ARG XCADDY_VERSION=v0.4.7
 ARG PHP_EXTENSIONS=apcu,bcmath,calendar,ctype,curl,dom,exif,fileinfo,filter,gd,gettext,gmp,iconv,intl,ldap,mbregex,mbstring,memcached,mysqli,mysqlnd,opcache,openssl,password-argon2,pcntl,pdo,pdo_mysql,pdo_pgsql,pdo_sqlite,pgsql,phar,posix,protobuf,rdkafka,redis,session,simplexml,sockets,sodium,sqlite3,sysvmsg,sysvsem,sysvshm,tidy,tokenizer,xml,xmlreader,xmlwriter,xsl,yaml,zip,zlib,zstd
 ARG PHP_EXTENSION_LIBS=nghttp2
 # 1 to replace musl's allocator, which is slow with threads, with mimalloc.
@@ -70,7 +73,7 @@ RUN --mount=type=secret,id=github_token \
 	--mount=type=bind,from=sources,target=/sources \
 	PHP_VERSION=${PHP_VERSION} SPC_COMMIT=${SPC_COMMIT} \
 	SQLITE_VERSION=${SQLITE_VERSION} SQLITE_ARCHIVE=${SQLITE_ARCHIVE} SQLITE_SHA3=${SQLITE_SHA3} \
-	STEP_CRYPTO_VERSION=${STEP_CRYPTO_VERSION} STEP_CERTIFICATES_VERSION=${STEP_CERTIFICATES_VERSION} \
+	STEP_CRYPTO_VERSION=${STEP_CRYPTO_VERSION} STEP_CERTIFICATES_VERSION=${STEP_CERTIFICATES_VERSION} XCADDY_VERSION=${XCADDY_VERSION} \
 	PHP_EXTENSIONS=${PHP_EXTENSIONS} PHP_EXTENSION_LIBS=${PHP_EXTENSION_LIBS} MIMALLOC=${MIMALLOC} \
 	bash /usr/local/bin/build-frankenphp.sh
 # The checks and licences, as their own step, so that a failure here keeps the compile above.
@@ -78,7 +81,7 @@ RUN --mount=type=secret,id=github_token \
 	--mount=type=cache,id=spc-sources-${SOURCES_REVISION}-${TARGETARCH}-${SOURCES_EPOCH},target=/go/src/app/dist/static-php-cli/downloads,sharing=locked \
 	--mount=type=bind,from=sources,target=/sources \
 	SQLITE_VERSION=${SQLITE_VERSION} SQLITE_ARCHIVE=${SQLITE_ARCHIVE} SQLITE_SHA3=${SQLITE_SHA3} \
-	STEP_CRYPTO_VERSION=${STEP_CRYPTO_VERSION} STEP_CERTIFICATES_VERSION=${STEP_CERTIFICATES_VERSION} \
+	STEP_CRYPTO_VERSION=${STEP_CRYPTO_VERSION} STEP_CERTIFICATES_VERSION=${STEP_CERTIFICATES_VERSION} XCADDY_VERSION=${XCADDY_VERSION} \
 	bash /usr/local/bin/after-compile.sh
 
 
@@ -259,6 +262,21 @@ COPY --from=alpine-sources /set/alpine/ /set/alpine/
 RUN printf 'php %s\narch %s\nbuilder %s\ndebian %s\nalpine %s\ncomposer %s\n' "${PHP_VERSION}" "${TARGETARCH}" \
 		"${FRANKENPHP_BUILDER}" "${DEBIAN_IMAGE}" "${ALPINE_IMAGE}" "${COMPOSER_IMAGE}" > /set/IMAGES.txt \
 	&& cd /set && find . -type f ! -name SHA256SUMS | sort | xargs sha256sum > SHA256SUMS
+
+# The set must rebuild a customer's binaries with no network. This proves it before the set, or any image built with
+# it, is published: build-frankenphp.sh with SET_CHECK=1 takes every download, Go, xcaddy and every Go module from the
+# set alone, with this build's settings, and stops before compiling (see build-frankenphp.sh).
+FROM ${FRANKENPHP_BUILDER} AS set-check
+COPY build-frankenphp.sh after-compile.sh check-sources.php /usr/local/bin/
+COPY tests/check-sources-test.php /usr/local/bin/tests/
+COPY --from=binary /out/build.env /tmp/build.env
+RUN --network=none --mount=type=bind,from=sources-index,source=/set,target=/sources \
+	set -a && . /tmp/build.env && set +a && SET_CHECK=1 bash /usr/local/bin/build-frankenphp.sh \
+	&& echo checked > /set-checked
+
+FROM sources-index AS sources-pack
+# Only a set that passed set-check is packed and published.
+COPY --from=set-check /set-checked /tmp/set-checked
 # The mirror keeps each file once, shared by every set that has it. The 3,500 or so small files (Go .mod and .info, the
 # Debian and Alpine package files) go into one tar, the same bytes whenever they are, so that a set's manifest stays
 # small; fetch-sources.sh unpacks it.
@@ -268,7 +286,7 @@ RUN apk add --no-cache -q tar \
 	&& tr '\n' '\0' < /tmp/small | xargs -0 rm && find . -type d -empty -delete
 
 FROM scratch AS sources-set
-COPY --from=sources-index /set/ /
+COPY --from=sources-pack /set/ /
 
 
 # The default target, and the last stage, so that a plain docker build produces the runtime image.

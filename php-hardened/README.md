@@ -245,7 +245,7 @@ by digest; and `SHA256SUMS`. The mirror also keeps those images, and the Dockerf
 1. Fetch the set, with this recipe (in the image at `/usr/share/kipchak-runtime/source/recipe/`):
 
    ```bash
-   ./fetch-sources.sh 8.5.12-20261110T1730-arm64 ./set   # the image's org.kipchak.sources label
+   ./fetch-sources.sh 8.5.12-20261111T0648-arm64 ./set   # the image's org.kipchak.sources label
    ```
 
 2. To use a modified library, replace its archive in `set/downloads/` under the same name, and set its `hash` in
@@ -278,6 +278,20 @@ by digest; and `SHA256SUMS`. The mirror also keeps those images, and the Dockerf
    With a set present, `build-frankenphp.sh` takes static-php-cli, every download and every Go module from it, and the
    network is never tried; the build fails if anything is missing. It still runs every check of a normal build. The
    lookups against upstream that only report how current the libraries are cannot run, and say so.
+
+   Every set is checked this way before it, or any image built with it, is published: the `set-check` stage of the
+   Dockerfile takes every download, Go, xcaddy and every Go module from the set with no network, and fails the build
+   otherwise.
+
+   **Sets labelled `8.4.27-20261111T0649` or `8.5.12-20261111T0648`.** These were published before xcaddy was pinned,
+   and their recipe installs xcaddy from its master branch, which a set cannot answer offline. Before building from one
+   of them, add the one file that says which version master meant (the set's own `v0.4.7`), then build as above:
+
+   ```bash
+   printf '{"Version":"v0.4.7"}\n' > set/gomod/github.com/caddyserver/xcaddy/@v/master.info
+   ```
+
+   The set itself is unchanged on the mirror, so its digest and `SHA256SUMS` still verify what you fetched.
 
 The build and alpine images install packages from Debian and Alpine as they build; their exact source packages are
 in the set, in `debian/` and `alpine/`, with the aports commit of each Alpine package in `alpine/COMMITS.txt`.
