@@ -18,9 +18,8 @@ ARG FRANKENPHP_VERSION=1.13.5
 ARG FRANKENPHP_BUILDER=dunglas/frankenphp:static-builder-musl-1.13.5@sha256:7e1a70e2f22d0b6e22e702f7665fa8b5ff7150addad541655f990b6d1db6d187
 # Where the build and alpine images take the runtime from: the runtime stage, or an image built from it.
 ARG RUNTIME_SOURCE=runtime
-# The other images the build starts from, by digest, so that a rebuild starts from the same ones. The pipeline passes
-# the digests current at the start of each ISO week, the same refresh as the libraries (SOURCES_EPOCH); these are
-# the defaults for a build outside it.
+# The other images the build starts from, by digest, so that a rebuild starts from the same ones. The pipeline builds
+# with these; it copies each, whole and under the same digest, to the public mirror before it publishes a set.
 ARG DEBIAN_IMAGE=debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 ARG ALPINE_IMAGE=alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 ARG COMPOSER_IMAGE=composer/composer:2-bin@sha256:56a1b0a72bacd78079e3fa49a49e7bf58326365753415c99385ea2b08bded0a5
@@ -258,9 +257,13 @@ COPY --from=binary /out-set/ /set/
 COPY --from=rootfs /etc/ssl/certs/ca-certificates.crt /usr/share/doc/ca-certificates/copyright /set/ca-certificates/
 COPY --from=debian-sources /set/debian/ /set/debian/
 COPY --from=alpine-sources /set/alpine/ /set/alpine/
-# What the set is for, the images it was built with (by digest; the mirror keeps copies), and every file's SHA-256.
-RUN printf 'php %s\narch %s\nbuilder %s\ndebian %s\nalpine %s\ncomposer %s\n' "${PHP_VERSION}" "${TARGETARCH}" \
+COPY Dockerfile /tmp/Dockerfile
+# What the set is for, the images it was built with and the Dockerfile frontend (from this file's syntax line), each by
+# the digest the mirror keeps it under, and every file's SHA-256.
+RUN printf 'php %s\narch %s\ndockerfile %s\nbuilder %s\ndebian %s\nalpine %s\ncomposer %s\n' "${PHP_VERSION}" "${TARGETARCH}" \
+		"$(sed -n '1s/^# syntax=//p' /tmp/Dockerfile)" \
 		"${FRANKENPHP_BUILDER}" "${DEBIAN_IMAGE}" "${ALPINE_IMAGE}" "${COMPOSER_IMAGE}" > /set/IMAGES.txt \
+	&& grep -q '^dockerfile docker/dockerfile:[^ ]*@sha256:[0-9a-f]\{64\}$' /set/IMAGES.txt \
 	&& cd /set && find . -type f ! -name SHA256SUMS | sort | xargs sha256sum > SHA256SUMS
 
 # The set must rebuild a customer's binaries with no network. This proves it before the set, or any image built with

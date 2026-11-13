@@ -237,7 +237,11 @@ esac || { echo "Expected FrankenPHP ${FRANKENPHP_VERSION} and PHP ${PHP_VERSION}
 	| sort -f > /out/extensions.txt
 # The download cache remembers whatever it has ever fetched, so an extension no longer built must not be recorded as a source.
 jq --arg extensions "${PHP_EXTENSIONS}" '($extensions | split(",") | map("ext-" + .)) as $built
-	| with_entries(select((.key | startswith("ext-") | not) or (.key | IN($built[]))))' downloads/.cache.json > /out/sources.lock.json
+	| with_entries(select((.key | startswith("ext-") | not) or (.key | IN($built[]))))' downloads/.cache.json > /tmp/sources.lock.json
+# The record leaves out when static-php-cli registered FrankenPHP's source directory: it has no hash or version (the
+# builder image's digest fixes the content), and only the time would differ in a rebuild. The set keeps it, as
+# static-php-cli's own record.
+jq 'if .frankenphp.source then .frankenphp.source.time = null else . end' /tmp/sources.lock.json > /out/sources.lock.json
 jq -r 'to_entries[] | select(.value.source != null)
 	| "\(.key) \(.value.source.filename // .value.source.dirname // .value.source.cache_type)"' \
 	/out/sources.lock.json | sort > /out/sources.txt
@@ -259,7 +263,7 @@ jq -r --arg platform "${platform}" 'to_entries[].value
 	[ -e "downloads/${entry}" ] || { echo "The lock names ${entry}, which is not in the downloads." >&2; exit 1; }
 	cp -a "downloads/${entry}" "${SET}/downloads/"
 done
-cp /out/sources.lock.json "${SET}/downloads/.cache.json"
+cp /tmp/sources.lock.json "${SET}/downloads/.cache.json"
 # The sources of the LGPL libraries linked into both programs, which every image carries itself (NOTICE.md). libiconv's
 # archive holds libcharset too.
 mkdir -p /out/source-libraries

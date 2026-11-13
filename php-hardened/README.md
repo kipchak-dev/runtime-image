@@ -239,8 +239,9 @@ rebuilt with nothing else reachable, including with a modified library. The imag
 
 A set holds: static-php-cli at `SPC_COMMIT`, with its Composer packages; every source and toolchain archive the build
 used, with static-php-cli's record of them (`downloads/`); the Go modules (`gomod/`); the CA certificates; the
-exact Debian and Alpine source packages of the build and alpine images; `IMAGES.txt`, the images it was built with,
-by digest; and `SHA256SUMS`. The mirror also keeps those images, and the Dockerfile frontend, by the same digests.
+exact Debian and Alpine source packages of the build and alpine images; `IMAGES.txt`, the images it was built with
+and the Dockerfile frontend, by digest; and `SHA256SUMS`. The mirror keeps each of those images, whole, under the same
+digest.
 
 1. Fetch the set, with this recipe (in the image at `/usr/share/kipchak-runtime/source/recipe/`):
 
@@ -264,16 +265,20 @@ by digest; and `SHA256SUMS`. The mirror also keeps those images, and the Dockerf
 
    ```bash
    M=1x.ax/mamluk/kipchak-sources
+   image() { echo "$M/$1@$(awk -v n="$1" '$1 == n { sub(/.*@/, "", $2); print $2 }' set/IMAGES.txt)"; }
    docker buildx build --network=none --no-cache --platform linux/arm64 --target runtime \
        --build-context sources=./set \
-       --build-arg BUILDKIT_SYNTAX=$M/dockerfile@sha256:... \
-       --build-arg FRANKENPHP_BUILDER=$M/builder@sha256:... \
-       --build-arg DEBIAN_IMAGE=$M/debian@sha256:... \
-       --build-arg ALPINE_IMAGE=$M/alpine@sha256:... \
-       --build-arg COMPOSER_IMAGE=$M/composer@sha256:... \
+       --build-arg BUILDKIT_SYNTAX="$(image dockerfile)" \
+       --build-arg FRANKENPHP_BUILDER="$(image builder)" \
+       --build-arg DEBIAN_IMAGE="$(image debian)" \
+       --build-arg ALPINE_IMAGE="$(image alpine)" \
+       --build-arg COMPOSER_IMAGE="$(image composer)" \
        --build-arg PHP_VERSION=8.5.12 --build-arg SOURCES_EPOCH=rebuild \
        -t my-runtime .
    ```
+
+   Sets published before 13 November 2026 have no `dockerfile` line: use the digest on the first line of the recipe's
+   `Dockerfile` (`# syntax=docker/dockerfile:1@sha256:...`).
 
    With a set present, `build-frankenphp.sh` takes static-php-cli, every download and every Go module from it, and the
    network is never tried; the build fails if anything is missing. It still runs every check of a normal build. The
