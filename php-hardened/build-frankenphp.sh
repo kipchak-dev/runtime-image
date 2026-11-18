@@ -67,6 +67,16 @@ pack() { tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner "$@" -cf
 
 mkdir -p "${FRANKENPHP_SOURCE_PATH}/dist/static-php-cli"
 cd "${FRANKENPHP_SOURCE_PATH}/dist/static-php-cli"
+
+# THE TWO PHASES. PHASE=download, run with the network, fetches everything the compile will need: static-php-cli and its
+# overrides, every source and toolchain archive, Go, xcaddy and every Go module. PHASE=compile, run with --network=none in
+# the Dockerfile, builds from what the download phase left, so every build proves that the compile needs nothing from
+# the network. PHASE=all (the default) runs both, one after the other.
+PHASE="${PHASE:-all}"
+case "${PHASE}" in download|compile|all) ;; *) echo "PHASE must be download, compile or all, not ${PHASE}" >&2; exit 1 ;; esac
+[ "${SET_CHECK:-0}" = 1 ] && [ "${PHASE}" = compile ] && { echo 'SET_CHECK runs the download phase' >&2; exit 1; }
+
+if [ "${PHASE}" != compile ]; then
 # Start from a clean checkout and build root; only the downloaded sources are kept, in the cache mount.
 find . -mindepth 1 -maxdepth 1 ! -name downloads -exec rm -rf {} +
 if from_set; then
@@ -122,6 +132,17 @@ grep -qF 'xcaddy/cmd/xcaddy@master' src/Package/Artifact/go_xcaddy.php \
 sed -i "s#xcaddy/cmd/xcaddy@master#xcaddy/cmd/xcaddy@${XCADDY_VERSION}#" src/Package/Artifact/go_xcaddy.php
 grep -qF "xcaddy/cmd/xcaddy@${XCADDY_VERSION}" src/Package/Artifact/go_xcaddy.php \
 	|| { echo 'The xcaddy override did not apply.' >&2; exit 1; }
+
+# A download that stops before compiling. craft has no such option: it reads craft-options.download but never
+# craft-options.build, and always goes on to extract and build. With SPC_DOWNLOAD_ONLY=1 the installer returns after
+# its download step, having resolved and fetched exactly what craft would build from. Its download step is the one place
+# both phases share, so the download phase and the set check fetch the same artifacts as the compile uses.
+# shellcheck disable=SC2016 # the dollar sign is part of the PHP text matched
+[ "$(grep -c '^        \$this->extractSourceArtifacts();$' src/StaticPHP/Package/PackageInstaller.php)" = 1 ] \
+	|| { echo 'static-php-cli changed PackageInstaller::run: review the download-only override in build-frankenphp.sh' >&2; exit 1; }
+sed -i "s#^        \\\$this->extractSourceArtifacts();\$#        if (getenv('SPC_DOWNLOAD_ONLY') === '1') { return; }\n&#" src/StaticPHP/Package/PackageInstaller.php
+grep -qF "if (getenv('SPC_DOWNLOAD_ONLY') === '1') { return; }" src/StaticPHP/Package/PackageInstaller.php \
+	|| { echo 'The download-only override did not apply.' >&2; exit 1; }
 
 # Off go-jose/v3 (see the Dockerfile). xcaddy builds the FrankenPHP module from this directory, and Go takes the highest
 # version any module requires, so requiring these here is what reaches the binary.
@@ -183,31 +204,45 @@ craft-options:
   download: true
 EOF
 
-# SET_CHECK=1 (the set-check stage of the Dockerfile, run with no network) proves the set can rebuild: everything the
-# build would download comes from it, and so do Go, xcaddy and every Go module the binary is built from. It stops there,
-# without compiling, so a set that would fail a customer's rebuild fails the pipeline before its images are published.
-if [ "${SET_CHECK:-0}" = 1 ]; then
-	from_set || { echo 'SET_CHECK needs a source set at /sources' >&2; exit 1; }
-	echo '  build: false' >> craft.yml # craft-options is the last block: check and download, but do not build
-	./bin/spc craft craft.yml
-	./bin/spc install-pkg go-xcaddy
-	go=/opt/spc-pkgroot/go-xcaddy/bin/go
-	export PATH="/opt/spc-pkgroot/go-xcaddy/bin:${PATH}" GOPATH=/opt/spc-pkgroot/go-xcaddy/go
-	# xcaddy writes the module FrankenPHP is built as, and resolves it, then stops before compiling.
-	# Its build environment goes in a directory of its own (xcaddy uses TMPDIR), so it is the only buildenv_ there.
-	work="$(mktemp -d)"
-	(cd "${work}" && TMPDIR="${work}" XCADDY_SKIP_BUILD=1 XCADDY_SKIP_CLEANUP=1 xcaddy build \
+# The download itself: what craft would fetch, then Go and xcaddy, then every Go module the binary imports. Nothing is
+# compiled. From a set (and in the set check) this runs with no network, so every one of them must come from the set.
+SPC_DOWNLOAD_ONLY=1 ./bin/spc craft craft.yml
+./bin/spc install-pkg go-xcaddy
+go=/opt/spc-pkgroot/go-xcaddy/bin/go
+# xcaddy writes the module FrankenPHP is built as, and resolves it, then stops before compiling.
+# Its build environment goes in a directory of its own (xcaddy uses TMPDIR), so it is the only buildenv_ there.
+work="$(mktemp -d)"
+(export PATH="/opt/spc-pkgroot/go-xcaddy/bin:${PATH}" GOPATH=/opt/spc-pkgroot/go-xcaddy/go
+	cd "${work}" && TMPDIR="${work}" XCADDY_SKIP_BUILD=1 XCADDY_SKIP_CLEANUP=1 xcaddy build \
 		--with "github.com/dunglas/frankenphp=${FRANKENPHP_SOURCE_PATH}" \
 		--with "github.com/dunglas/frankenphp/caddy=${FRANKENPHP_SOURCE_PATH}/caddy" \
 		--with github.com/dunglas/caddy-cbrotli)
-	module="$(ls -d "${work}"/buildenv_* 2> /dev/null | head -n 1)"
-	[ -d "${module}" ] || { echo 'xcaddy left no build environment to check' >&2; exit 1; }
-	# Every package the binary imports, from the set's modules alone. Nothing is compiled.
-	modules="$(cd "${module}" && CGO_ENABLED=1 "${go}" list -deps -f '{{with .Module}}{{.Path}}@{{.Version}}{{end}}' . | sort -u | grep -c .)"
-	echo "The source set rebuilds offline: downloads, Go, xcaddy ${XCADDY_VERSION} and the ${modules} Go modules the binary imports."
+module="$(ls -d "${work}"/buildenv_* 2> /dev/null | head -n 1)"
+[ -d "${module}" ] || { echo 'xcaddy left no build environment to check' >&2; exit 1; }
+# Every package the binary imports. With the network this fetches each module; from a set, each must be in it.
+modules="$(cd "${module}" && GOPATH=/opt/spc-pkgroot/go-xcaddy/go CGO_ENABLED=1 "${go}" list -deps \
+	-f '{{with .Module}}{{.Path}}@{{.Version}}{{end}}' . | sort -u | grep -c .)"
+rm -rf "${work}"
+echo "Downloaded: every source and toolchain archive, Go, xcaddy ${XCADDY_VERSION} and the ${modules} Go modules the binary imports."
+fi # the download phase
+
+# SET_CHECK=1 (the set-check stage of the Dockerfile, run with no network) proves the set can rebuild: it is the download
+# phase run from the set alone, so everything the build downloads must be in it. It stops there, without compiling, so a
+# set that would fail a customer's rebuild fails the pipeline before its images are published.
+if [ "${SET_CHECK:-0}" = 1 ]; then
+	from_set || { echo 'SET_CHECK needs a source set at /sources' >&2; exit 1; }
+	echo "The source set rebuilds offline: downloads, Go, xcaddy ${XCADDY_VERSION} and the Go modules the binary imports."
 	exit 0
 fi
+[ "${PHASE}" = download ] && exit 0
 
+# THE COMPILE. Everything was fetched by the download phase, so nothing is downloaded and the doctor, which can fetch
+# missing tools, is not run again. Go may read only its module cache.
+[ -f craft.yml ] || { echo 'No craft.yml: run the download phase first' >&2; exit 1; }
+sed -i 's/^  doctor: true$/  doctor: false/; s/^  download: true$/  download: false/' craft.yml
+grep -qx '  download: false' craft.yml && grep -qx '  doctor: false' craft.yml \
+	|| { echo 'craft.yml was not switched to compile only' >&2; exit 1; }
+export GOPROXY=off GOSUMDB=off GOFLAGS=-mod=mod GOTOOLCHAIN=local
 if ! ./bin/spc craft craft.yml; then
 	# The build log stays inside the failed build step, so show where it went wrong.
 	grep -h -n -i -E 'error|undefined reference' log/*.log 2> /dev/null \

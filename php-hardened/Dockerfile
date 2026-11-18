@@ -66,11 +66,22 @@ ARG TARGETARCH
 
 COPY build-frankenphp.sh after-compile.sh check-sources.php /usr/local/bin/
 COPY tests/check-sources-test.php /usr/local/bin/tests/
-# Downloaded sources are cached for the epoch, so retried and repeated builds do not download them again.
+# Two steps. The download step fetches everything, with the network; downloaded sources are cached for the epoch, so
+# retried and repeated builds do not download them again. The GitHub token reaches it only as a secret mount, never as
+# an ARG or ENV, so it is in no layer and no build history. The compile step has no network at all, so every build proves
+# that the binaries compile from what was downloaded, which the set check proves is all in the source set.
 RUN --mount=type=secret,id=github_token \
 	--mount=type=cache,id=spc-sources-${SOURCES_REVISION}-${TARGETARCH}-${SOURCES_EPOCH},target=/go/src/app/dist/static-php-cli/downloads,sharing=locked \
 	--mount=type=bind,from=sources,target=/sources \
-	PHP_VERSION=${PHP_VERSION} SPC_COMMIT=${SPC_COMMIT} \
+	PHASE=download PHP_VERSION=${PHP_VERSION} SPC_COMMIT=${SPC_COMMIT} \
+	SQLITE_VERSION=${SQLITE_VERSION} SQLITE_ARCHIVE=${SQLITE_ARCHIVE} SQLITE_SHA3=${SQLITE_SHA3} \
+	STEP_CRYPTO_VERSION=${STEP_CRYPTO_VERSION} STEP_CERTIFICATES_VERSION=${STEP_CERTIFICATES_VERSION} XCADDY_VERSION=${XCADDY_VERSION} \
+	PHP_EXTENSIONS=${PHP_EXTENSIONS} PHP_EXTENSION_LIBS=${PHP_EXTENSION_LIBS} MIMALLOC=${MIMALLOC} \
+	bash /usr/local/bin/build-frankenphp.sh
+RUN --network=none \
+	--mount=type=cache,id=spc-sources-${SOURCES_REVISION}-${TARGETARCH}-${SOURCES_EPOCH},target=/go/src/app/dist/static-php-cli/downloads,sharing=locked \
+	--mount=type=bind,from=sources,target=/sources \
+	PHASE=compile PHP_VERSION=${PHP_VERSION} SPC_COMMIT=${SPC_COMMIT} \
 	SQLITE_VERSION=${SQLITE_VERSION} SQLITE_ARCHIVE=${SQLITE_ARCHIVE} SQLITE_SHA3=${SQLITE_SHA3} \
 	STEP_CRYPTO_VERSION=${STEP_CRYPTO_VERSION} STEP_CERTIFICATES_VERSION=${STEP_CERTIFICATES_VERSION} XCADDY_VERSION=${XCADDY_VERSION} \
 	PHP_EXTENSIONS=${PHP_EXTENSIONS} PHP_EXTENSION_LIBS=${PHP_EXTENSION_LIBS} MIMALLOC=${MIMALLOC} \
