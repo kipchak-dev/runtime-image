@@ -285,7 +285,7 @@ COPY build-frankenphp.sh after-compile.sh check-sources.php /usr/local/bin/
 COPY tests/check-sources-test.php /usr/local/bin/tests/
 COPY --from=binary /out/build.env /tmp/build.env
 RUN --network=none --mount=type=bind,from=sources-index,source=/set,target=/sources \
-	set -a && . /tmp/build.env && set +a && SET_CHECK=1 bash /usr/local/bin/build-frankenphp.sh \
+	set -a && . /tmp/build.env && set +a && SET_CHECK=1 REQUIRE_SUMDB=1 bash /usr/local/bin/build-frankenphp.sh \
 	&& echo checked > /set-checked
 
 FROM sources-index AS sources-pack

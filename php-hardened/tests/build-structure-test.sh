@@ -24,7 +24,11 @@ check_compile_no_secret() { r="$(run_of "$1" compile)"; [ -n "$r" ] && ! printf 
 check_token_not_arg_env() { ! grep -q -i -E '^[[:space:]]*(ARG|ENV)[[:space:]].*(github_token|GITHUB_TOKEN)' "$1"; }
 check_download_only_in_script() { grep -q '^SPC_DOWNLOAD_ONLY=1 ./bin/spc craft craft.yml$' "$2"; }
 check_no_build_false() { ! grep -qx "  build: false" "$2"; }
-check_compile_offline_go() { grep -q '^export GOPROXY=off ' "$2"; }
+check_compile_offline_go() { l="$(grep '^GOPROXY=' "$2")"; case "$l" in 'GOPROXY="file://'*) ! printf '%s' "$l" | grep -q -E 'https?:' ;; *) false ;; esac && grep -q '^export GOPROXY GOFLAGS=-mod=mod ' "$2"; }
+check_sumdb_kept() { [ "$(grep -c 'GOSUMDB=off' "$2")" -eq 1 ] && grep -q '^		export GOSUMDB=off$' "$2"; }
+check_no_placeholder_versions() { grep -qF "if grep -q 'v0\.0\.0-00010101000000-000000000000' /out/build-info.txt; then" "$2" && grep -qx 'for m in github.com/dunglas/frankenphp github.com/dunglas/frankenphp/caddy; do' "$2"; }
+check_set_check_requires_sumdb() { grep -q 'SET_CHECK=1 REQUIRE_SUMDB=1 bash /usr/local/bin/build-frankenphp.sh' "$1" && grep -q 'REQUIRE_SUMDB=1 requires them.* exit 1$' "$2" && grep -q 'if \[ "\${REQUIRE_SUMDB:-0}" = 1 \]; then' "$2"; }
+check_caddy_pinned() { grep -qF '*" Caddy ${caddy_version} "*) ;;' "$2" && grep -q '^mkdir -p /out && printf .%s\\n. "${caddy_version}" > /out/caddy-version$' "$2"; }
 
 try() { # <name> <check> <Dockerfile> <script>
     if "$2" "$3" "$4"; then echo "ok: $1"; else echo "FAIL: $1"; fail=1; fi
@@ -37,6 +41,10 @@ try "the token is in no ARG or ENV" check_token_not_arg_env "$D" "$S"
 try "the download phase stops before compiling" check_download_only_in_script "$D" "$S"
 try "no craft-options build: false, which craft ignores" check_no_build_false "$D" "$S"
 try "Go reads only its module cache in the compile" check_compile_offline_go "$D" "$S"
+try "checksums stay checked, except for a set without records" check_sumdb_kept "$D" "$S"
+try "the Caddy release is recorded and asserted" check_caddy_pinned "$D" "$S"
+try "our set check refuses a set without checksum records" check_set_check_requires_sumdb "$D" "$S"
+try "no module is recorded without a version" check_no_placeholder_versions "$D" "$S"
 
 control() { # <name> <check> <file: D or S> <sed expression>
     cp "$D" "$W/Dockerfile"; cp "$S" "$W/build-frankenphp.sh"
@@ -53,7 +61,14 @@ control "the token as an ARG" check_token_not_arg_env D 's/^ARG TARGETARCH$/ARG 
 control "the token as an ENV" check_token_not_arg_env D 's/^ARG TARGETARCH$/ARG TARGETARCH\nENV github_token=x/'
 control "a download phase that builds" check_download_only_in_script S 's/^SPC_DOWNLOAD_ONLY=1 \.\/bin\/spc craft craft.yml$/.\/bin\/spc craft craft.yml/'
 control "build: false again" check_no_build_false S "s/^craft-options:\$/craft-options:\n  build: false/"
-control "Go free to download in the compile" check_compile_offline_go S 's/^export GOPROXY=off /export GOFLAGS_UNUSED=1 /'
+control "Go free to download in the compile" check_compile_offline_go S 's|^GOPROXY="file://|GOPROXY="https://proxy.golang.org,file://|'
+control "checksums switched off in the compile" check_sumdb_kept S 's|^export GOPROXY GOFLAGS=-mod=mod |export GOPROXY GOSUMDB=off GOFLAGS=-mod=mod |'
+control "no Caddy assertion" check_caddy_pinned S '/^\t\*" Caddy \${caddy_version} "\*) ;;$/d'
+control "set check without REQUIRE_SUMDB" check_set_check_requires_sumdb D 's/SET_CHECK=1 REQUIRE_SUMDB=1 /SET_CHECK=1 /'
+control "REQUIRE_SUMDB ignored" check_set_check_requires_sumdb S '/REQUIRE_SUMDB=1 requires them/s/exit 1/:/'
+control "placeholder versions allowed" check_no_placeholder_versions S '/^if grep -q .v0.*build-info.txt; then$/s/if grep -q/if false \&\& grep -q/'
+control "FrankenPHP modules not fetched" check_no_placeholder_versions S 's/^for m in github.com\/dunglas\/frankenphp github.com\/dunglas\/frankenphp\/caddy; do$/for m in; do/'
+control "no Caddy record" check_caddy_pinned S '/^mkdir -p \/out && printf .%s\\n. "\${caddy_version}" > \/out\/caddy-version$/d'
 
 [ "$fail" -eq 0 ] && echo "build-structure: every check and control behaves as stated"
 exit "$fail"

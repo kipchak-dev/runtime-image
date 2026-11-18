@@ -61,6 +61,22 @@ fi
 SOURCES=/sources
 SET=/out-set
 from_set() { [ -f "${SOURCES}/static-php-cli.tar.gz" ]; }
+# Go checks every module against sum.golang.org, the Go checksum database. With the network, it asks the database and
+# keeps the answers in its module cache; every set carries those answers in gomod/sumdb, and the marker file
+# "supported" lets Go read them from the set as its proxy, with no network. A set made before the answers were kept
+# has no marker: its modules are then read unchecked, as they always were, and the build says so.
+gosumdb() {
+	if from_set && [ ! -f "${SOURCES}/gomod/sumdb/sum.golang.org/supported" ]; then
+		# Mamluk's own set check sets REQUIRE_SUMDB=1: a set it has just made must carry its records.
+		if [ "${REQUIRE_SUMDB:-0}" = 1 ]; then
+			echo 'This source set carries no checksum database records, and REQUIRE_SUMDB=1 requires them.' >&2; exit 1
+		fi
+		echo 'NOTICE: this source set carries no checksum database records; its Go modules are not checked against sum.golang.org.'
+		export GOSUMDB=off
+	else
+		unset GOSUMDB
+	fi
+}
 mkdir -p "${SET}"
 # Archives written the same way every time, so the same contents give the same bytes and are stored once.
 pack() { tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner "$@" -cf - . | gzip -n; }
@@ -85,8 +101,10 @@ if from_set; then
 		|| { echo "The set's static-php-cli is not at SPC_COMMIT ${SPC_COMMIT}." >&2; exit 1; }
 	# The set's downloads, with static-php-cli's record of them, so that its download step finds every one in place.
 	cp -a "${SOURCES}/downloads/." downloads/
-	# The Go modules from the set alone. go.sum still checks every one of them.
-	export GOPROXY="file://${SOURCES}/gomod" GOSUMDB=off GOFLAGS=-mod=mod GOTOOLCHAIN=local
+	# The Go modules from the set alone, each checked against the checksum database's records that the set carries
+	# (gosumdb, below). A set made before those records were kept has none, so it is read as before, unchecked.
+	export GOPROXY="file://${SOURCES}/gomod" GOFLAGS=-mod=mod GOTOOLCHAIN=local
+	gosumdb
 else
 	git init --quiet
 	git fetch --quiet --depth 1 https://github.com/crazywhalecc/static-php-cli "${SPC_COMMIT}"
@@ -206,6 +224,9 @@ EOF
 
 # The download itself: what craft would fetch, then Go and xcaddy, then every Go module the binary imports. Nothing is
 # compiled. From a set (and in the set check) this runs with no network, so every one of them must come from the set.
+# The doctor first, on its own: its fixes (zig, for one) install packages through the same installer, which the
+# download-only override would stop before installing.
+./bin/spc doctor --auto-fix
 SPC_DOWNLOAD_ONLY=1 ./bin/spc craft craft.yml
 ./bin/spc install-pkg go-xcaddy
 go=/opt/spc-pkgroot/go-xcaddy/bin/go
@@ -222,7 +243,23 @@ module="$(ls -d "${work}"/buildenv_* 2> /dev/null | head -n 1)"
 # Every package the binary imports. With the network this fetches each module; from a set, each must be in it.
 modules="$(cd "${module}" && GOPATH=/opt/spc-pkgroot/go-xcaddy/go CGO_ENABLED=1 "${go}" list -deps \
 	-f '{{with .Module}}{{.Path}}@{{.Version}}{{end}}' . | sort -u | grep -c .)"
+# The Caddy release the binary will be built with. xcaddy asks for Caddy with no version, and from a file proxy "latest"
+# is whatever the cache holds, so the compile must build exactly this one (checked after the build).
+caddy_version="$(cd "${module}" && GOPATH=/opt/spc-pkgroot/go-xcaddy/go "${go}" list -m -f '{{.Version}}' github.com/caddyserver/caddy/v2)"
+printf '%s\n' "${caddy_version}" | grep -Eqx 'v2\.[0-9]+\.[0-9]+' || { echo "Could not resolve the Caddy release: '${caddy_version}'" >&2; exit 1; }
+mkdir -p /out && printf '%s\n' "${caddy_version}" > /out/caddy-version
+# FrankenPHP's own modules are built from the builder image's source (xcaddy replaces them with /go/src/app), but the
+# binary's build information records the version Go resolved for them. Go downloads nothing for a replaced module, so
+# its version is not in the module cache, and offline "latest" would resolve to a placeholder (v0.0.0-...). Download
+# each at the version resolved here, so that the compile records the same version a networked build does.
+for m in github.com/dunglas/frankenphp github.com/dunglas/frankenphp/caddy; do
+	v="$(cd "${module}" && GOPATH=/opt/spc-pkgroot/go-xcaddy/go "${go}" list -m -f '{{if .Replace}}{{.Version}}{{end}}' "${m}")"
+	printf '%s\n' "${v}" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+' || { echo "Could not resolve the version recorded for ${m}: '${v}'" >&2; exit 1; }
+	(cd "${module}" && GOPATH=/opt/spc-pkgroot/go-xcaddy/go GOFLAGS=-mod=mod "${go}" mod download "${m}@${v}")
+	echo "${m} is recorded as ${v}."
+done
 rm -rf "${work}"
+echo "Caddy ${caddy_version}."
 echo "Downloaded: every source and toolchain archive, Go, xcaddy ${XCADDY_VERSION} and the ${modules} Go modules the binary imports."
 fi # the download phase
 
@@ -240,9 +277,22 @@ fi
 # missing tools, is not run again. Go may read only its module cache.
 [ -f craft.yml ] || { echo 'No craft.yml: run the download phase first' >&2; exit 1; }
 sed -i 's/^  doctor: true$/  doctor: false/; s/^  download: true$/  download: false/' craft.yml
-grep -qx '  download: false' craft.yml && grep -qx '  doctor: false' craft.yml \
-	|| { echo 'craft.yml was not switched to compile only' >&2; exit 1; }
-export GOPROXY=off GOSUMDB=off GOFLAGS=-mod=mod GOTOOLCHAIN=local
+if ! grep -qx '  download: false' craft.yml || ! grep -qx '  doctor: false' craft.yml; then
+	echo 'craft.yml was not switched to compile only' >&2; exit 1
+fi
+# Go reads modules only from the two module caches the download phase filled, served as file proxies (as a rebuild
+# from a set reads the set's). GOPROXY=off is not enough: xcaddy runs `go get github.com/caddyserver/caddy/v2` with no
+# version, and resolving "latest" is a lookup, which GOPROXY=off refuses even when the module is cached. The step runs
+# with --network=none, so nothing can come from elsewhere. Every module is still checked against the checksum
+# database's answers, which the download phase kept in the cache (gosumdb); a module with no recorded answer fails.
+go=/opt/spc-pkgroot/go-xcaddy/bin/go
+GOPROXY="file://$(GOPATH=/opt/spc-pkgroot/go-xcaddy/go "${go}" env GOMODCACHE)/cache/download,file://$("${go}" env GOMODCACHE)/cache/download"
+from_set && GOPROXY="${GOPROXY},file://${SOURCES}/gomod"
+case "${GOPROXY}" in *http:*|*https:*) echo 'The compile must not name a network proxy' >&2; exit 1 ;; esac
+export GOPROXY GOFLAGS=-mod=mod GOTOOLCHAIN=local
+gosumdb
+caddy_version="$(cat /out/caddy-version 2> /dev/null || true)"
+printf '%s\n' "${caddy_version}" | grep -Eqx 'v2\.[0-9]+\.[0-9]+' || { echo 'No Caddy release recorded: run the download phase first' >&2; exit 1; }
 if ! ./bin/spc craft craft.yml; then
 	# The build log stays inside the failed build step, so show where it went wrong.
 	grep -h -n -i -E 'error|undefined reference' log/*.log 2> /dev/null \
@@ -263,6 +313,16 @@ case "${version}" in
 	*"FrankenPHP v${FRANKENPHP_VERSION} PHP ${PHP_VERSION} "*) [ "${php}" = "${PHP_VERSION}" ] ;;
 	*) false ;;
 esac || { echo "Expected FrankenPHP ${FRANKENPHP_VERSION} and PHP ${PHP_VERSION}, built php ${php}" >&2; exit 1; }
+# Every module the binary records carries a real version: a placeholder means a version was not in the module cache.
+if grep -q 'v0\.0\.0-00010101000000-000000000000' /out/build-info.txt; then
+	grep 'v0\.0\.0-00010101000000-000000000000' /out/build-info.txt >&2
+	echo 'The build information records a module with no version; the download phase did not fetch it.' >&2; exit 1
+fi
+# And the Caddy release the download phase resolved, not whatever else the module cache might hold.
+case "${version}" in
+	*" Caddy ${caddy_version} "*) ;;
+	*) echo "Expected Caddy ${caddy_version}, built: ${version}" >&2; exit 1 ;;
+esac
 # ICU (intl) crashed on first use when the php CLI was linked with thread-local storage relocations left for run
 # time, which musl never applies in a static binary. Use it here, so that such a binary fails the build.
 /out/php -n -r 'echo (new NumberFormatter("en", NumberFormatter::DECIMAL))->format(1234.5), PHP_EOL;'
@@ -324,6 +384,10 @@ find "${SET}/gomod" -name '*.mod' -path '*/@v/*' | while read -r mod; do
 	[ -f "${info}" ] || printf '{"Version":"%s"}\n' "$(basename "${mod%.mod}")" > "${info}"
 done
 find "${SET}/gomod" -name '*.lock' -delete
+# The checksum database's answers, which a rebuild checks every module against, and the marker that serves them.
+[ -d "${SET}/gomod/sumdb/sum.golang.org" ] \
+	|| { echo 'The module cache holds no checksum database records; the set could not be checked offline.' >&2; exit 1; }
+touch "${SET}/gomod/sumdb/sum.golang.org/supported"
 echo "--- The source set"
 du -sh "${SET}"/* 2> /dev/null || true
 
