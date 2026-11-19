@@ -249,7 +249,7 @@ rebuilt with nothing else reachable, including with a modified library. The imag
 `org.kipchak.sources` label, for example `8.5.12-20261110-arm64`.
 
 A set holds: static-php-cli at `SPC_COMMIT`, with its Composer packages; every source and toolchain archive the build
-used, with static-php-cli's record of them (`downloads/`); the Go modules (`gomod/`); the CA certificates; the
+used, with static-php-cli's record of them and the public address each archive was downloaded from (`downloads/`, `downloads/.download-urls`); the Go modules (`gomod/`); the CA certificates; the
 exact Debian and Alpine source packages of the build and alpine images; `IMAGES.txt`, the images it was built with
 and the Dockerfile frontend, by digest; and `SHA256SUMS`. The mirror keeps each of those images, whole, under the same
 digest.

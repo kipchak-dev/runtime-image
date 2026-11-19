@@ -190,6 +190,8 @@ grep -qF "if (getenv('SPC_DOWNLOAD_ONLY') === '1') { return; }" src/StaticPHP/Pa
 # static-php-cli runs curl with -f, so it sees only that an API request failed (curl exit code 22). Each request to
 # api.github.com that carried an Authorization header and failed so is made once more without it. Nothing else changes:
 # other hosts, and requests that carried no token, fail as before.
+# The same patch records, for every download, the address it came from in downloads/.download-urls, which the source set
+# carries so that Mamluk's promote job can download each archive again and compare it (Amendment 1).
 php <<'PHP'
 <?php
 $file = 'src/StaticPHP/Runtime/Shell/DefaultShell.php';
@@ -216,7 +218,13 @@ $edits = [
         . "            }\n"
         . "            logger()->warning(\"GitHub refused the token for {\$url}; downloading again without it\");\n"
         . "            \$this->executeCurlDownload(\$url, \$path, array_values(preg_grep('/^Authorization:/i', \$headers, PREG_GREP_INVERT)), \$hooks, \$retries);\n"
-        . "        }\n",
+        . "            return;\n"
+        . "        }\n"
+        // Where each download came from (Amendment 1): the address as requested, before any redirect, its headers
+        // without Authorization, and the file it was saved as. Written after the download succeeded, by the call that
+        // succeeded. The set carries it, and check-download-urls.sh refuses anything not public before it is written.
+        . "        \$public = array_values(preg_grep('/^Authorization:/i', \$headers, PREG_GREP_INVERT));\n"
+        . "        file_put_contents(dirname(\$path) . '/.download-urls', \$url . \"\\t\" . implode(' | ', \$public) . \"\\t\" . basename(\$path) . \"\\n\", FILE_APPEND | LOCK_EX);\n",
 ];
 foreach ($edits as $old => $new) {
     if (substr_count($text, $old) !== 1) {
@@ -228,6 +236,7 @@ foreach ($edits as $old => $new) {
 file_put_contents($file, $text);
 PHP
 [ "$(grep -c 'GitHub refused the token for' src/StaticPHP/Runtime/Shell/DefaultShell.php)" = 2 ] \
+	&& grep -qF "dirname(\$path) . '/.download-urls'" src/StaticPHP/Runtime/Shell/DefaultShell.php \
 	&& php -l src/StaticPHP/Runtime/Shell/DefaultShell.php > /dev/null \
 	|| { echo 'The anonymous retry did not apply.' >&2; exit 1; }
 
@@ -428,6 +437,23 @@ jq -r --arg platform "${platform}" 'to_entries[].value
 	cp -a "downloads/${entry}" "${SET}/downloads/"
 done
 cp /tmp/sources.lock.json "${SET}/downloads/.cache.json"
+# Where each archive in the set was downloaded from (Amendment 1): for every file the set holds, the last address that
+# file was saved from. A set rebuilt from an older set has no record to carry and writes none; a build that downloaded
+# must have one for every archive, and every address in it must be public (check-download-urls.sh).
+: > /tmp/download-urls
+if [ -f downloads/.download-urls ]; then
+	for file in "${SET}"/downloads/*; do
+		[ -f "${file}" ] || continue
+		name="$(basename "${file}")"
+		awk -F '\t' -v n="${name}" '$3 == n { line = $0 } END { if (line != "") print line }' downloads/.download-urls > /tmp/download-url
+		if [ -s /tmp/download-url ]; then cat /tmp/download-url >> /tmp/download-urls
+		elif ! from_set; then echo "No download address was recorded for ${name}." >&2; exit 1; fi
+	done
+	bash /usr/local/bin/check-download-urls.sh /tmp/download-urls
+	cp /tmp/download-urls "${SET}/downloads/.download-urls"
+elif ! from_set; then
+	echo 'The download phase recorded no download addresses (downloads/.download-urls).' >&2; exit 1
+fi
 # The sources of the LGPL libraries linked into both programs, which every image carries itself (NOTICE.md). libiconv's
 # archive holds libcharset too.
 mkdir -p /out/source-libraries

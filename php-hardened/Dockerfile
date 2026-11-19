@@ -64,7 +64,7 @@ ARG SOURCES_EPOCH=local
 ARG SOURCES_REVISION=2
 ARG TARGETARCH
 
-COPY build-frankenphp.sh after-compile.sh check-sources.php /usr/local/bin/
+COPY build-frankenphp.sh after-compile.sh check-sources.php check-download-urls.sh /usr/local/bin/
 COPY tests/check-sources-test.php /usr/local/bin/tests/
 # Two steps. The download step fetches everything, with the network; downloaded sources are cached for the epoch, so
 # retried and repeated builds do not download them again. The GitHub token reaches it only as a secret mount, never as
@@ -127,7 +127,7 @@ RUN mkdir -p /rootfs/usr/share/kipchak-runtime/THIRD-PARTY-LICENCES/debian-ca-ce
 	&& cp /usr/share/doc/ca-certificates/copyright /rootfs/usr/share/kipchak-runtime/THIRD-PARTY-LICENCES/debian-ca-certificates/
 # What NOTICE.md says the image carries: the notice, the build recipe, and the LGPL libraries' sources as built.
 COPY NOTICE.md /rootfs/usr/share/kipchak-runtime/NOTICE.md
-COPY Dockerfile build.sh build-frankenphp.sh after-compile.sh alpine-licences.sh check-sources.php debian-sources.sh \
+COPY Dockerfile build.sh build-frankenphp.sh after-compile.sh alpine-licences.sh check-sources.php check-download-urls.sh debian-sources.sh \
 	alpine-sources.sh fetch-sources.sh README.md NOTICE.md /rootfs/usr/share/kipchak-runtime/source/recipe/
 COPY tests/ /rootfs/usr/share/kipchak-runtime/source/recipe/tests/
 COPY etc/ /rootfs/usr/share/kipchak-runtime/source/recipe/etc/
@@ -281,7 +281,7 @@ RUN printf 'php %s\narch %s\ndockerfile %s\nbuilder %s\ndebian %s\nalpine %s\nco
 # it, is published: build-frankenphp.sh with SET_CHECK=1 takes every download, Go, xcaddy and every Go module from the
 # set alone, with this build's settings, and stops before compiling (see build-frankenphp.sh).
 FROM ${FRANKENPHP_BUILDER} AS set-check
-COPY build-frankenphp.sh after-compile.sh check-sources.php /usr/local/bin/
+COPY build-frankenphp.sh after-compile.sh check-sources.php check-download-urls.sh /usr/local/bin/
 COPY tests/check-sources-test.php /usr/local/bin/tests/
 COPY --from=binary /out/build.env /tmp/build.env
 RUN --network=none --mount=type=bind,from=sources-index,source=/set,target=/sources \
