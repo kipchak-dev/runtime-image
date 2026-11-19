@@ -184,6 +184,53 @@ sed -i "s#^        \\\$this->extractSourceArtifacts();\$#        if (getenv('SPC
 grep -qF "if (getenv('SPC_DOWNLOAD_ONLY') === '1') { return; }" src/StaticPHP/Package/PackageInstaller.php \
 	|| { echo 'The download-only override did not apply.' >&2; exit 1; }
 
+# An anonymous retry when GitHub refuses the token. A project whose organisation keeps an IP allow list (confluentinc,
+# for librdkafka) refuses an authenticated API request from an address outside that list with 403, even for its public
+# releases, and GitHub applies the list to the GitHub Actions token; the same request without a token is answered.
+# static-php-cli runs curl with -f, so it sees only that an API request failed (curl exit code 22). Each request to
+# api.github.com that carried an Authorization header and failed so is made once more without it. Nothing else changes:
+# other hosts, and requests that carried no token, fail as before.
+php <<'PHP'
+<?php
+$file = 'src/StaticPHP/Runtime/Shell/DefaultShell.php';
+$text = file_get_contents($file);
+if (str_contains($text, 'GitHub refused the token for')) {
+    fwrite(STDERR, "DefaultShell.php already carries the anonymous retry: static-php-cli was not freshly checked out\n");
+    exit(1);
+}
+$edits = [
+    // executeCurl: the API requests (release lists, latest releases, tags).
+    "        if (\$ret === 2 || \$ret === -1073741510) {\n" =>
+        "        if (\$ret === 22 && str_starts_with(\$url, 'https://api.github.com/') && preg_grep('/^Authorization:/i', \$headers) !== []) {\n"
+        . "            logger()->warning(\"GitHub refused the token for {\$url}; asking again without it\");\n"
+        . "            return \$this->executeCurl(\$url, \$method, array_values(preg_grep('/^Authorization:/i', \$headers, PREG_GREP_INVERT)), \$hooks, \$retries, \$compressed);\n"
+        . "        }\n"
+        . "        if (\$ret === 2 || \$ret === -1073741510) {\n",
+    // executeCurlDownload: the archive downloads, whose URLs for GitHub tarballs are on api.github.com too.
+    "        \$this->passthru(\$cmd, \$this->console_putput, capture_output: false, throw_on_error: true);\n" =>
+        "        try {\n"
+        . "            \$this->passthru(\$cmd, \$this->console_putput, capture_output: false, throw_on_error: true);\n"
+        . "        } catch (ExecutionException \$e) {\n"
+        . "            if (!str_starts_with(\$url, 'https://api.github.com/') || preg_grep('/^Authorization:/i', \$headers) === []) {\n"
+        . "                throw \$e;\n"
+        . "            }\n"
+        . "            logger()->warning(\"GitHub refused the token for {\$url}; downloading again without it\");\n"
+        . "            \$this->executeCurlDownload(\$url, \$path, array_values(preg_grep('/^Authorization:/i', \$headers, PREG_GREP_INVERT)), \$hooks, \$retries);\n"
+        . "        }\n",
+];
+foreach ($edits as $old => $new) {
+    if (substr_count($text, $old) !== 1) {
+        fwrite(STDERR, "static-php-cli changed DefaultShell.php: review the anonymous retry in build-frankenphp.sh\n");
+        exit(1);
+    }
+    $text = str_replace($old, $new, $text);
+}
+file_put_contents($file, $text);
+PHP
+[ "$(grep -c 'GitHub refused the token for' src/StaticPHP/Runtime/Shell/DefaultShell.php)" = 2 ] \
+	&& php -l src/StaticPHP/Runtime/Shell/DefaultShell.php > /dev/null \
+	|| { echo 'The anonymous retry did not apply.' >&2; exit 1; }
+
 # Off go-jose/v3 (see the Dockerfile). xcaddy builds the FrankenPHP module from this directory, and Go takes the highest
 # version any module requires, so requiring these here is what reaches the binary.
 : "${STEP_CRYPTO_VERSION:?STEP_CRYPTO_VERSION is required}" "${STEP_CERTIFICATES_VERSION:?STEP_CERTIFICATES_VERSION is required}"
