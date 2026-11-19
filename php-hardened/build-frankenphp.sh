@@ -44,7 +44,8 @@ fi
 # has features that real arm64 machines such as Apple silicon lack, so php and frankenphp died with SIGILL there.
 # A named architecture compiles for its baseline, as static-php-cli does by default.
 unset SPC_LIBC
-export SPC_TARGET="$(uname -m)-linux-musl"
+SPC_TARGET="$(uname -m)-linux-musl"
+export SPC_TARGET
 # zig opens many file descriptors when a lot of extensions are linked statically.
 ulimit -n 8192 2> /dev/null || true
 
@@ -419,12 +420,12 @@ for entry in "default:$("${go}" env GOPATH)" "xcaddy:/opt/spc-pkgroot/go-xcaddy/
 	[ -d "${lookups}" ] || continue
 	note="${gopath}/pkg/sumdb/sum.golang.org/latest"
 	[ -f "${note}" ] || { echo "The ${name} Go client cached checksum answers but kept no tree note at ${note}." >&2; exit 1; }
-	newest=0
-	for answer in $(find "${lookups}" -type f); do
-		size="$(sumdb_tree "${answer}")"
-		case "${size}" in '' | *[!0-9]*) echo "Unreadable checksum answer: ${answer}" >&2; exit 1 ;; esac
-		[ "${size}" -gt "${newest}" ] && newest="${size}"
-	done
+	# Every cached answer must name a tree size; one that does not is unreadable, and stops the set.
+	answers="$(find "${lookups}" -type f | wc -l)"
+	sizes="$(find "${lookups}" -type f -exec awk '/^go.sum database tree$/ { getline; print; exit }' {} \;)"
+	[ "$(printf '%s\n' "${sizes}" | grep -Ecx '[0-9]+')" -eq "${answers}" ] \
+		|| { echo "The ${name} Go client's cached checksum answers are not all readable (${answers} answers)." >&2; exit 1; }
+	newest="$(printf '%s\n' "${sizes}" | sort -n | tail -n 1)"
 	kept="$(sumdb_tree "${note}")"
 	case "${kept}" in '' | *[!0-9]*) echo "Unreadable tree note: ${note}" >&2; exit 1 ;; esac
 	[ "${kept}" -ge "${newest}" ] \

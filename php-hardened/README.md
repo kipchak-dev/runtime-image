@@ -1,7 +1,8 @@
 # Hardened Kipchak runtime
 
 A FrankenPHP image for running Kipchak APIs in production, for PHP 8.4 and 8.5, on `linux/amd64` and
-`linux/arm64`. It is part of Kipchak Enterprise.
+`linux/arm64`. The recipe is open source, under the MIT licence. Pre-built, signed images with verified provenance
+are included with Kipchak Enterprise.
 
 FrankenPHP and PHP are built from source into one static binary, linked against musl with mimalloc as the
 allocator. The image is that binary on an empty filesystem (`FROM scratch`), with:
@@ -206,29 +207,39 @@ not.
 
 ## Building
 
-Concourse builds and pushes both PHP versions, for both architectures, from
-`concourse-pipelines/pipelines/mamluk/kipchak-runtime.yml`: on every commit, and daily. To build by hand:
+Anyone may build the image from this recipe. GitHub Actions builds both PHP versions, natively on `linux/amd64` and
+`linux/arm64`, on every commit to `master` and each week (`.github/workflows/build.yml`), into a private staging
+package. Mamluk checks each of those builds, rebuilds it for comparison, and publishes and signs the images Kipchak
+Enterprise customers receive. Builds you make yourself are your own: they are not signed by Mamluk and are not
+covered by support under an Order.
+
+To build by hand:
 
 ```bash
 ./build.sh            # PHP 8.4 and 8.5, both architectures, pushed
 ./build.sh 8.5        # one version
 PUSH=0 ./build.sh 8.5 # build only
 SOURCES_EPOCH=$(date +%s) ./build.sh # refresh the libraries now, rather than at the start of the week
+REGISTRY=registry.example.com/php ./build.sh 8.5 # push to your own registry
 ```
 
-`build.sh` also attaches an SBOM and provenance when it pushes. The pipeline, which publishes the images customers
-receive, does not: its images are signed by digest, and carry no build attestations. Their contents are recorded in
+`build.sh` also attaches an SBOM and provenance when it pushes. Mamluk's published images are signed by digest
+instead (see [Verifying Mamluk's images](../README.md#verifying-mamluks-images)), and their contents are recorded in
 `/usr/share/kipchak-runtime/`.
 
 A plain `docker build` needs `--build-arg PHP_VERSION=8.5.11`, the exact release.
 
 Each architecture compiles PHP and every library from source. Natively, on four cores, one PHP version takes
-about 15 minutes; under emulation, several times longer. To build both natively, add a machine of the other
-architecture to the builder, as described in `build.sh`.
+about 15 minutes to an hour, depending on the machine; under emulation, several times longer. To build both
+natively, add a machine of the other architecture to the builder, as described in `build.sh`.
 
 static-php-cli downloads most library sources from GitHub, and GitHub allows 60 API requests an hour without a
-token. `build.sh` uses `GITHUB_TOKEN`, or Composer's GitHub token if that is not set; the pipeline uses
-`((github.composer_token))`. Sources are cached for the week.
+token. `build.sh` uses `GITHUB_TOKEN`, or Composer's GitHub token if that is not set. The token reaches the build
+only as a secret, never as a build argument. Sources are cached for the week.
+
+**A fresh build takes the current upstream versions.** static-php-cli resolves most library sources when the build
+runs, to the latest release of each, so two builds of this recipe on different days can contain different library
+versions. To rebuild one of Mamluk's images exactly, use its source set (below).
 
 ## Rebuilding from the source set
 

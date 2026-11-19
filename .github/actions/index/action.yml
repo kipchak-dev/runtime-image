@@ -1,0 +1,74 @@
+# Joins the amd64 and arm64 builds of one image into one index in ghcr.io/kipchak-dev/runtime-builds, attests the
+# index's build provenance, and only then gives it its build tag <line>-<image>-<12-character commit>. Mamluk's
+# pipeline watches for build tags, so it never sees a build before its attestation exists. A local composite action,
+# so the attestation is signed with the identity of .github/workflows/build.yml on the branch that ran it.
+name: index
+description: Join the two platform builds, attest the index and give it its build tag
+inputs:
+  line:
+    description: The PHP release line, for example 8.5
+    required: true
+  image:
+    description: sources, runtime, build or alpine
+    required: true
+outputs:
+  digest:
+    description: The attested index's digest
+    value: ${{ steps.index.outputs.digest }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        pattern: digest-${{ inputs.line }}-${{ inputs.image }}-*
+        merge-multiple: true
+        path: ${{ runner.temp }}/digests
+    - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+    - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+    # The index first gets a "-pending" tag, which Mamluk's pipeline ignores.
+    - name: Join the two platforms into one index
+      id: index
+      shell: bash
+      env:
+        LINE: ${{ inputs.line }}
+        IMAGE: ${{ inputs.image }}
+        SHA: ${{ github.sha }}
+        REPOSITORY: ghcr.io/kipchak-dev/runtime-builds
+      run: |
+        set -euo pipefail
+        tag="$LINE-$IMAGE-${SHA:0:12}"
+        d="$RUNNER_TEMP/digests"
+        for arch in amd64 arm64; do
+          [[ "$(cat "$d/$arch")" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "No $arch build of $IMAGE" >&2; exit 1; }
+        done
+        docker buildx imagetools create -t "$REPOSITORY:$tag-pending" "$REPOSITORY@$(cat "$d/amd64")" "$REPOSITORY@$(cat "$d/arm64")"
+        skopeo inspect --raw "docker://$REPOSITORY:$tag-pending" > "$RUNNER_TEMP/index.json"
+        digest="sha256:$(sha256sum < "$RUNNER_TEMP/index.json" | awk '{print $1}')"
+        platforms="$(jq -r '[.manifests[] | "\(.platform.os)/\(.platform.architecture)"] | sort | join(",")' "$RUNNER_TEMP/index.json")"
+        [ "$platforms" = "linux/amd64,linux/arm64" ] || { echo "The index holds $platforms" >&2; exit 1; }
+        echo "tag=$tag" >> "$GITHUB_OUTPUT"
+        echo "digest=$digest" >> "$GITHUB_OUTPUT"
+        echo "$REPOSITORY:$tag-pending is $digest (linux/amd64, linux/arm64)"
+    - name: Attest the build provenance
+      uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+      with:
+        subject-name: ghcr.io/kipchak-dev/runtime-builds
+        subject-digest: ${{ steps.index.outputs.digest }}
+        push-to-registry: true
+        create-storage-record: false
+    - name: Give the attested index its build tag
+      shell: bash
+      env:
+        TAG: ${{ steps.index.outputs.tag }}
+        DIGEST: ${{ steps.index.outputs.digest }}
+        REPOSITORY: ghcr.io/kipchak-dev/runtime-builds
+      run: |
+        set -euo pipefail
+        skopeo copy -q --all --preserve-digests "docker://$REPOSITORY@$DIGEST" "docker://$REPOSITORY:$TAG"
+        got="sha256:$(skopeo inspect --raw "docker://$REPOSITORY:$TAG" | sha256sum | awk '{print $1}')"
+        [ "$got" = "$DIGEST" ] || { echo "$REPOSITORY:$TAG is $got, not $DIGEST" >&2; exit 1; }
+        echo "$REPOSITORY:$TAG is $DIGEST"

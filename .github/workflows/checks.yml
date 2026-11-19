@@ -1,0 +1,46 @@
+# The checks every change must pass, on pull requests and on pushes. They read the repository and run its tests;
+# they build no image and hold no write permission, so a pull request from anyone runs them safely.
+name: checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  recipe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The build's structure (network, secrets, checksums, versions)
+        run: sh php-hardened/tests/build-structure-test.sh
+      - name: Every input pinned, the same for every builder
+        run: sh php-hardened/tests/pins-test.sh
+      - name: The scripts pass shellcheck
+        run: shellcheck -S warning php-hardened/*.sh php-hardened/tests/*.sh .github/lint/*.sh
+
+  workflows:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: No workflow that runs on pull requests can publish
+        run: sh .github/lint/triggers-test.sh && sh .github/lint/triggers.sh .github/workflows
+      - name: Every action is pinned by a full commit SHA
+        run: sh .github/lint/pinned-actions-test.sh && sh .github/lint/pinned-actions.sh .github
+      - name: actionlint 1.7.12, checked against its published digest
+        run: |
+          set -eu
+          v=1.7.12
+          curl -fsSLo "$RUNNER_TEMP/actionlint.tgz" \
+            "https://github.com/rhysd/actionlint/releases/download/v$v/actionlint_${v}_linux_amd64.tar.gz"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tgz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color

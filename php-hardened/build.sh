@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Builds and pushes the hardened runtime, build and Alpine images for PHP 8.4 and 8.5, for linux/amd64 and linux/arm64.
-# Concourse does the same in pipelines/mamluk/kipchak-runtime.yml; this script is for building by hand.
+# GitHub Actions does the same in .github/workflows/build.yml; this script is for building by hand.
 #
 #   ./build.sh             build and push everything
 #   ./build.sh 8.5         one PHP version
@@ -48,6 +48,8 @@ fi
 
 secrets=()
 if [ -n "${GITHUB_TOKEN:-}" ]; then
+	# One argument: the comma separates the secret's fields, not array elements.
+	# shellcheck disable=SC2054
 	secrets=(--secret id=github_token,env=GITHUB_TOKEN)
 fi
 

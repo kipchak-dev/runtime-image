@@ -9,7 +9,7 @@
 #   alpine             the runtime's binary and settings on Alpine, for APIs that need to add programs (git, for
 #                      the Git driver) with apk.
 #
-# PHP_VERSION is required: the exact release, e.g. 8.5.11. ./build.sh and the Concourse pipeline look up the latest
+# PHP_VERSION is required: the exact release, e.g. 8.5.11. ./build.sh and the build workflow look up the latest
 # release of each PHP version on php.net and pass it in. See README.md.
 
 ARG FRANKENPHP_VERSION=1.13.5

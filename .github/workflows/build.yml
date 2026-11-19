@@ -1,0 +1,274 @@
+# Builds the Kipchak Runtime Image into the private build package ghcr.io/kipchak-dev/runtime-builds, under build tags
+# <line>-<image>-<12-character commit>, each with a build provenance attestation. For each PHP line in
+# php-hardened/build.env it builds four indexes, each for linux/amd64 and linux/arm64 on native runners:
+#   sources   the source set the binaries are compiled from, for rebuilding with no network
+#   runtime   the static FrankenPHP binary on an empty filesystem
+#   build     the runtime's binaries on Debian, for building an application image
+#   alpine    the runtime's binaries on Alpine, to extend
+#
+# This workflow publishes nothing that customers pull. Mamluk's pipeline checks each build's attestation and its
+# inputs, rebuilds it for comparison, copies it by digest to Mamluk's registry and signs it with Mamluk's key. Builds
+# in runtime-builds are unsigned, transient and unsupported.
+#
+# Only a push to master, the weekly schedule and a manual run can build and publish: pull requests run
+# .github/workflows/checks.yml, which has no write permission.
+name: build
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - "php-hardened/**"
+      - ".github/workflows/build.yml"
+      - ".github/actions/**"
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The latest release of each PHP line, the ISO week and each build's source-set name, resolved once so that every
+  # job of the run, and Mamluk's comparison build, use the same values.
+  resolve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      lines: ${{ steps.resolve.outputs.lines }}
+      epoch: ${{ steps.resolve.outputs.epoch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: resolve
+        name: Resolve the releases
+        run: |
+          set -eu
+          . php-hardened/build.env
+          stamp="$(date -u +%Y%m%dT%H%M)"
+          lines="[]"
+          for line in $PHP_LINES; do
+            release="$(curl -fsSL "https://www.php.net/releases/index.php?json&version=$line" | jq -r '.version // empty')"
+            case "$release" in "$line".*) ;; *) echo "Could not find the latest PHP $line release on php.net" >&2; exit 1 ;; esac
+            lines="$(printf '%s' "$lines" | jq -c --arg l "$line" --arg r "$release" --arg s "$release-$stamp" '. + [{line: $l, release: $r, set: $s}]')"
+          done
+          echo "lines=$lines" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+          echo "$lines"
+
+  # The source set and the runtime for one line and one platform, in one job and one builder, so that both use the
+  # same compile.
+  binary:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ${{ fromJSON(needs.resolve.outputs.lines) }}
+        platform:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    name: binary ${{ matrix.php.line }} ${{ matrix.platform.arch }}
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 330
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Disk before the build
+        run: df -h / "$RUNNER_TEMP"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      # static-php-cli downloads most library sources from GitHub, which allows few API requests without a token. The
+      # run's own token reaches the build only as a secret mount, never as an argument (php-hardened/tests).
+      - name: Build the source set
+        id: sources
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: php-hardened
+          target: sources-set
+          platforms: linux/${{ matrix.platform.arch }}
+          pull: true
+          provenance: false
+          sbom: false
+          secrets: github_token=${{ github.token }}
+          build-args: |
+            PHP_VERSION=${{ matrix.php.release }}
+            SOURCES_EPOCH=${{ needs.resolve.outputs.epoch }}
+            SOURCES_SET=${{ matrix.php.set }}
+          outputs: type=image,name=ghcr.io/kipchak-dev/runtime-builds,push-by-digest=true,name-canonical=true,push=true
+      - name: Build the runtime
+        id: runtime
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: php-hardened
+          target: runtime
+          platforms: linux/${{ matrix.platform.arch }}
+          provenance: false
+          sbom: false
+          secrets: github_token=${{ github.token }}
+          build-args: |
+            PHP_VERSION=${{ matrix.php.release }}
+            SOURCES_EPOCH=${{ needs.resolve.outputs.epoch }}
+            SOURCES_SET=${{ matrix.php.set }}
+          outputs: type=image,name=ghcr.io/kipchak-dev/runtime-builds,push-by-digest=true,name-canonical=true,push=true
+      - name: Record the digests
+        env:
+          SOURCES: ${{ steps.sources.outputs.digest }}
+          RUNTIME: ${{ steps.runtime.outputs.digest }}
+          ARCH: ${{ matrix.platform.arch }}
+        run: |
+          set -eu
+          for d in "$SOURCES" "$RUNTIME"; do
+            printf '%s\n' "$d" | grep -Eqx 'sha256:[0-9a-f]{64}' || { echo "A build reported no digest" >&2; exit 1; }
+          done
+          mkdir -p "$RUNNER_TEMP/sources" "$RUNNER_TEMP/runtime"
+          printf '%s\n' "$SOURCES" > "$RUNNER_TEMP/sources/$ARCH"
+          printf '%s\n' "$RUNTIME" > "$RUNNER_TEMP/runtime/$ARCH"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.php.line }}-sources-${{ matrix.platform.arch }}
+          path: ${{ runner.temp }}/sources/${{ matrix.platform.arch }}
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.php.line }}-runtime-${{ matrix.platform.arch }}
+          path: ${{ runner.temp }}/runtime/${{ matrix.platform.arch }}
+          if-no-files-found: error
+          retention-days: 1
+      - name: Disk after the build
+        if: always()
+        run: df -h / "$RUNNER_TEMP"
+
+  binary-index:
+    needs: [resolve, binary]
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ${{ fromJSON(needs.resolve.outputs.lines) }}
+        image: [sources, runtime]
+    name: index ${{ matrix.php.line }} ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/index
+        with:
+          line: ${{ matrix.php.line }}
+          image: ${{ matrix.image }}
+
+  # The build and Alpine images, built from this run's attested runtime index by digest, as Mamluk's pipeline builds
+  # them from the published runtime. If the runtime failed, they fail too, because its build tag does not exist.
+  derived:
+    needs: [resolve, binary-index]
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ${{ fromJSON(needs.resolve.outputs.lines) }}
+        image: [build, alpine]
+        platform:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    name: ${{ matrix.image }} ${{ matrix.php.line }} ${{ matrix.platform.arch }}
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Find this run's runtime index
+        id: runtime
+        env:
+          LINE: ${{ matrix.php.line }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          tag="ghcr.io/kipchak-dev/runtime-builds:$LINE-runtime-${SHA:0:12}"
+          digest="sha256:$(skopeo inspect --raw "docker://$tag" | sha256sum | awk '{print $1}')"
+          echo "source=ghcr.io/kipchak-dev/runtime-builds@$digest" >> "$GITHUB_OUTPUT"
+          echo "Runtime: $tag ($digest)"
+      - name: Build
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: php-hardened
+          target: ${{ matrix.image }}
+          platforms: linux/${{ matrix.platform.arch }}
+          pull: true
+          provenance: false
+          sbom: false
+          build-args: |
+            PHP_VERSION=${{ matrix.php.release }}
+            SOURCES_EPOCH=${{ needs.resolve.outputs.epoch }}
+            SOURCES_SET=${{ matrix.php.set }}
+            RUNTIME_SOURCE=${{ steps.runtime.outputs.source }}
+          outputs: type=image,name=ghcr.io/kipchak-dev/runtime-builds,push-by-digest=true,name-canonical=true,push=true
+      - name: Record the digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          ARCH: ${{ matrix.platform.arch }}
+        run: |
+          set -eu
+          printf '%s\n' "$DIGEST" | grep -Eqx 'sha256:[0-9a-f]{64}' || { echo "The build reported no digest" >&2; exit 1; }
+          mkdir -p "$RUNNER_TEMP/digest" && printf '%s\n' "$DIGEST" > "$RUNNER_TEMP/digest/$ARCH"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digest-${{ matrix.php.line }}-${{ matrix.image }}-${{ matrix.platform.arch }}
+          path: ${{ runner.temp }}/digest/${{ matrix.platform.arch }}
+          if-no-files-found: error
+          retention-days: 1
+
+  derived-index:
+    needs: [resolve, derived]
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ${{ fromJSON(needs.resolve.outputs.lines) }}
+        image: [build, alpine]
+    name: index ${{ matrix.php.line }} ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/index
+        with:
+          line: ${{ matrix.php.line }}
+          image: ${{ matrix.image }}

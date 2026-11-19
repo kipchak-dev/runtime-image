@@ -17,7 +17,8 @@ branch="$(cut -d. -f1,2 /etc/alpine-release)-stable"
 # Alpine keeps a copy of every source file its packages are built from. abuild tries it first and the upstream URL only
 # if it lacks a file, so an upstream that is down (dev.gentoo.org, for pax-utils, on 11 November) does not fail the
 # set. abuild checks every file against the APKBUILD's sha512sums wherever it came from.
-export DISTFILES_MIRROR="https://distfiles.alpinelinux.org/distfiles/v$(cut -d. -f1,2 /etc/alpine-release)"
+DISTFILES_MIRROR="https://distfiles.alpinelinux.org/distfiles/v$(cut -d. -f1,2 /etc/alpine-release)"
+export DISTFILES_MIRROR
 git clone -q --filter=blob:none --no-checkout -b "${branch}" https://gitlab.alpinelinux.org/alpine/aports.git /tmp/aports
 cd /tmp/aports
 
