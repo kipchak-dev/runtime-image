@@ -359,6 +359,30 @@ for m in github.com/dunglas/frankenphp github.com/dunglas/frankenphp/caddy; do
 done
 rm -rf "${work}"
 echo "Caddy ${caddy_version}."
+# The set merges both Go clients' module caches, xcaddy's over the default's, as the set writer below does. An answer one
+# client cached from a larger checksum tree than the other client's note then needs a proof between the two trees,
+# from tiles neither client fetched, and the offline set check fails reading them. While the network is here, Go checks
+# every answer in that merged view against both notes and fetches what is missing (sumdb-prove.sh); the tiles go into
+# xcaddy's cache, which the set carries.
+if ! from_set; then
+	merged="$(mktemp -d)"
+	xcaddy_cache="$(GOPATH=/opt/spc-pkgroot/go-xcaddy/go "${go}" env GOMODCACHE)/cache/download"
+	cp -a "$("${go}" env GOMODCACHE)/cache/download/." "${merged}/"
+	cp -a "${xcaddy_cache}/." "${merged}/"
+	chmod -R u+w "${merged}"
+	notes=""
+	for note in "$("${go}" env GOPATH)/pkg/sumdb/sum.golang.org/latest" /opt/spc-pkgroot/go-xcaddy/go/pkg/sumdb/sum.golang.org/latest; do
+		[ -f "${note}" ] && notes="${notes} ${note}"
+	done
+	# shellcheck disable=SC2086 # one argument per note
+	sh /usr/local/bin/sumdb-prove.sh "${go}" "${merged}" ${notes}
+	(cd "${merged}" && find . -path './sumdb/sum.golang.org/tile/*' -type f) | while read -r tile; do
+		[ -f "${xcaddy_cache}/${tile}" ] && continue
+		mkdir -p "$(dirname "${xcaddy_cache}/${tile}")"
+		cp "${merged}/${tile}" "${xcaddy_cache}/${tile}"
+	done
+	rm -rf "${merged:?}"
+fi
 echo "Downloaded: every source and toolchain archive, Go, xcaddy ${XCADDY_VERSION} and the ${modules} Go modules the binary imports."
 fi # the download phase
 

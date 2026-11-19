@@ -32,7 +32,8 @@ check_notes_carried() { grep -qF 'cp "${note}" "${SET}/gosumdb/${name}.latest"' 
 check_after_compile_sumdb() { [ "$(grep -c 'GOSUMDB=off' "$3")" -eq 1 ] && grep -qx '		export GOSUMDB=off' "$3" && grep -qF 'cp "${gopath_file%.gopath}.latest"' "$3"; }
 check_github_retry() { grep -qF 'asking again without it' "$2" && grep -qF 'downloading again without it' "$2" && grep -qF "'https://api.github.com/') && preg_grep" "$2"; }
 check_download_urls() { grep -qF "'/.download-urls', " "$2" && grep -qF 'FILE_APPEND | LOCK_EX' "$2" && grep -qx '	bash /usr/local/bin/check-download-urls.sh /tmp/download-urls' "$2" && grep -q '^COPY build-frankenphp.sh .*check-download-urls.sh.* /usr/local/bin/$' "$1"; }
-check_rate_limit_wait() { [ "$(grep -cF 'kipchak_github_rate_limit_wait()) {' "$2")" -eq 2 ] && grep -qx 'cp /usr/local/bin/github-rate-limit.php src/kipchak-github-rate-limit.php' "$2" && grep -q '^COPY build-frankenphp.sh .*github-rate-limit.php /usr/local/bin/$' "$1"; }
+check_rate_limit_wait() { [ "$(grep -cF 'kipchak_github_rate_limit_wait()) {' "$2")" -eq 2 ] && grep -qx 'cp /usr/local/bin/github-rate-limit.php src/kipchak-github-rate-limit.php' "$2" && grep -q '^COPY build-frankenphp.sh .*github-rate-limit.php.* /usr/local/bin/$' "$1"; }
+check_sumdb_prove() { grep -qx '	sh /usr/local/bin/sumdb-prove.sh "${go}" "${merged}" ${notes}' "$2" && grep -q '^COPY build-frankenphp.sh .*sumdb-prove.sh.* /usr/local/bin/$' "$1" && awk '/^if ! from_set; then$/ { inside = 1 } inside && /sumdb-prove.sh/ { found = 1 } /^fi # the download phase$/ { exit !found } END { if (!found) exit 1 }' "$2"; }
 check_caddy_pinned() { grep -qF '*" Caddy ${caddy_version} "*) ;;' "$2" && grep -q '^mkdir -p /out && printf .%s\\n. "${caddy_version}" > /out/caddy-version$' "$2"; }
 
 try() { # <name> <check> <Dockerfile> <script>
@@ -55,6 +56,7 @@ try "the licence step checks checksums too, except for a set without records" ch
 try "a token GitHub refuses is retried without it, for api.github.com only" check_github_retry "$D" "$S"
 try "every download address is recorded, and checked as public before the set is written" check_download_urls "$D" "$S"
 try "a request refused anonymously for a used-up allowance waits for its reset, once" check_rate_limit_wait "$D" "$S"
+try "while the network is there, every Go checksum answer is proved against both notes and the proofs kept" check_sumdb_prove "$D" "$S"
 
 control() { # <name> <check> <file: D, S or A> <sed expression>
     cp "$D" "$W/Dockerfile"; cp "$S" "$W/build-frankenphp.sh"; cp "$A" "$W/after-compile.sh"
@@ -82,6 +84,8 @@ control "tree notes not restored" check_notes_carried S '/^\t\tfrom_set \&\& res
 control "a stale tree note accepted" check_notes_carried S '/tree note (\${kept}) is older than a cached answer/d'
 control "the licence step unchecked" check_after_compile_sumdb A 's|^\texport GOPROXY=file:///sources/gomod GOFLAGS=-mod=mod GOTOOLCHAIN=local$|\texport GOPROXY=file:///sources/gomod GOSUMDB=off GOFLAGS=-mod=mod GOTOOLCHAIN=local|'
 control "no rate-limit wait" check_rate_limit_wait S '/kipchak_github_rate_limit_wait()) {/d'
+control "no checksum proofs" check_sumdb_prove S '/sh \/usr\/local\/bin\/sumdb-prove.sh/d'
+control "checksum proofs not in the image" check_sumdb_prove D 's/ sumdb-prove.sh / /'
 control "download addresses not checked" check_download_urls S '/bash \/usr\/local\/bin\/check-download-urls.sh \/tmp\/download-urls/d'
 control "no anonymous retry for downloads" check_github_retry S '/downloading again without it/d'
 control "no Caddy record" check_caddy_pinned S '/^mkdir -p \/out && printf .%s\\n. "\${caddy_version}" > \/out\/caddy-version$/d'

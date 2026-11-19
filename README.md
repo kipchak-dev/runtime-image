@@ -50,6 +50,15 @@ attestations. To check it for an image's digest:
 gh attestation verify oci://1x.ax/mamluk/enterprise/php/8.5@sha256:<digest> --repo kipchak-dev/runtime-image
 ```
 
+## Changing the recipe
+
+The checks workflow runs every test that needs no network. Run these by hand as well, and record their output in the
+commit message:
+
+- When the download phase of `php-hardened/build-frankenphp.sh` or `php-hardened/sumdb-prove.sh` changes:
+  `sh php-hardened/tests/sumdb-prove-test.sh` (needs the network and a `go` command; it can wait up to 15 minutes
+  for the Go checksum database to grow).
+
 ## Contributing
 
 Pull requests opened on this repository are not merged. To report a problem or propose a change,
