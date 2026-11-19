@@ -74,8 +74,29 @@ gosumdb() {
 		echo 'NOTICE: this source set carries no checksum database records; its Go modules are not checked against sum.golang.org.'
 		export GOSUMDB=off
 	else
+		from_set && restore_sumdb_notes
 		unset GOSUMDB
 	fi
+}
+# The newest checksum-database tree each Go client verified in the download phase. Go keeps it in
+# $GOPATH/pkg/sumdb/sum.golang.org/latest, outside the module cache, and needs it offline: without it, a client that
+# meets cached answers from two tree sizes must prove the two consistent from tiles the download phase never fetched.
+# The set carries one signed note per GOPATH (gosumdb/<name>.latest, with that GOPATH in gosumdb/<name>.gopath), and
+# each is put back where its client reads it. The notes are signed by sum.golang.org's key, which Go checks.
+sumdb_tree() { awk '/^go.sum database tree$/ { getline; print; exit }' "$1"; }
+restore_sumdb_notes() {
+	restored=0
+	for gopath_file in "${SOURCES}"/gosumdb/*.gopath; do
+		[ -f "${gopath_file}" ] || continue
+		note="${gopath_file%.gopath}.latest"
+		gopath="$(cat "${gopath_file}")"
+		[ -f "${note}" ] && [ -n "${gopath}" ] || { echo "The source set's ${gopath_file##*/} has no tree note beside it." >&2; exit 1; }
+		mkdir -p "${gopath}/pkg/sumdb/sum.golang.org"
+		cp "${note}" "${gopath}/pkg/sumdb/sum.golang.org/latest"
+		restored=$((restored + 1))
+	done
+	[ "${restored}" -gt 0 ] || {
+		echo 'The source set carries checksum database records but not the tree notes they are checked against.' >&2; exit 1; }
 }
 mkdir -p "${SET}"
 # Archives written the same way every time, so the same contents give the same bytes and are stored once.
@@ -388,6 +409,32 @@ find "${SET}/gomod" -name '*.lock' -delete
 [ -d "${SET}/gomod/sumdb/sum.golang.org" ] \
 	|| { echo 'The module cache holds no checksum database records; the set could not be checked offline.' >&2; exit 1; }
 touch "${SET}/gomod/sumdb/sum.golang.org/supported"
+# Each Go client's newest verified tree note (restore_sumdb_notes). A note must exist wherever that client cached
+# answers, and must be no older than the newest tree any of those answers names: an older one would leave the client
+# needing proofs that were never fetched.
+mkdir -p "${SET}/gosumdb"
+for entry in "default:$("${go}" env GOPATH)" "xcaddy:/opt/spc-pkgroot/go-xcaddy/go"; do
+	name="${entry%%:*}"; gopath="${entry#*:}"
+	lookups="$(GOPATH="${gopath}" "${go}" env GOMODCACHE)/cache/download/sumdb/sum.golang.org/lookup"
+	[ -d "${lookups}" ] || continue
+	note="${gopath}/pkg/sumdb/sum.golang.org/latest"
+	[ -f "${note}" ] || { echo "The ${name} Go client cached checksum answers but kept no tree note at ${note}." >&2; exit 1; }
+	newest=0
+	for answer in $(find "${lookups}" -type f); do
+		size="$(sumdb_tree "${answer}")"
+		case "${size}" in '' | *[!0-9]*) echo "Unreadable checksum answer: ${answer}" >&2; exit 1 ;; esac
+		[ "${size}" -gt "${newest}" ] && newest="${size}"
+	done
+	kept="$(sumdb_tree "${note}")"
+	case "${kept}" in '' | *[!0-9]*) echo "Unreadable tree note: ${note}" >&2; exit 1 ;; esac
+	[ "${kept}" -ge "${newest}" ] \
+		|| { echo "The ${name} tree note (${kept}) is older than a cached answer (${newest})." >&2; exit 1; }
+	cp "${note}" "${SET}/gosumdb/${name}.latest"
+	printf '%s\n' "${gopath}" > "${SET}/gosumdb/${name}.gopath"
+	echo "Checksum tree note for the ${name} Go client: tree ${kept}, newest cached answer ${newest}."
+done
+ls "${SET}"/gosumdb/*.latest > /dev/null 2>&1 \
+	|| { echo 'No Go client kept a checksum tree note; the set could not be checked offline.' >&2; exit 1; }
 echo "--- The source set"
 du -sh "${SET}"/* 2> /dev/null || true
 

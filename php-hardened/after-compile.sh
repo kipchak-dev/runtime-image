@@ -9,8 +9,22 @@ cd "${FRANKENPHP_SOURCE_PATH}/dist/static-php-cli"
 
 # Rebuilt from a source set (see build-frankenphp.sh): the Go licences below come from the set's modules.
 from_set() { [ -f /sources/static-php-cli.tar.gz ]; }
+# They are checked against the checksum database's answers and tree notes the set carries, as build-frankenphp.sh
+# checks them; only a set made before those records were kept is read unchecked.
 if from_set; then
-	export GOPROXY=file:///sources/gomod GOSUMDB=off GOFLAGS=-mod=mod GOTOOLCHAIN=local
+	export GOPROXY=file:///sources/gomod GOFLAGS=-mod=mod GOTOOLCHAIN=local
+	if [ -f /sources/gomod/sumdb/sum.golang.org/supported ]; then
+		unset GOSUMDB
+		for gopath_file in /sources/gosumdb/*.gopath; do
+			[ -f "${gopath_file}" ] || { echo 'The source set carries checksum records but no tree notes.' >&2; exit 1; }
+			gopath="$(cat "${gopath_file}")"
+			mkdir -p "${gopath}/pkg/sumdb/sum.golang.org"
+			cp "${gopath_file%.gopath}.latest" "${gopath}/pkg/sumdb/sum.golang.org/latest"
+		done
+	else
+		echo 'NOTICE: this source set carries no checksum database records; its Go modules are not checked against sum.golang.org.'
+		export GOSUMDB=off
+	fi
 fi
 
 if [ -f /run/secrets/github_token ]; then
