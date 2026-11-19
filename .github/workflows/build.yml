@@ -84,20 +84,6 @@ jobs:
           persist-credentials: false
       - name: Disk before the build
         run: df -h / "$RUNNER_TEMP"
-      # static-php-cli asks GitHub's API for most library releases. This makes one such request with the run's token
-      # and one without, and prints only the status, GitHub's message and the rate-limit headers, so that a failed
-      # download says whether the token or the limit was the cause.
-      - name: GitHub API access
-        env:
-          TOKEN: ${{ github.token }}
-        run: |
-          url=https://api.github.com/repos/confluentinc/librdkafka/releases/latest
-          for mode in token anonymous; do
-            if [ "$mode" = token ]; then auth=(-H "Authorization: Bearer $TOKEN"); else auth=(); fi
-            code="$(curl -sS -o "$RUNNER_TEMP/api.json" -D "$RUNNER_TEMP/api.headers" -w '%{http_code}' "${auth[@]}" "$url")"
-            limit="$(grep -i -E '^x-ratelimit-(limit|remaining|resource):' "$RUNNER_TEMP/api.headers" | tr -d '\r' | tr '\n' ' ')"
-            echo "$mode: HTTP $code; $(jq -r '.tag_name // .message // "no body"' "$RUNNER_TEMP/api.json"); $limit"
-          done
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
