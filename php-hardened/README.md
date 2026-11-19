@@ -310,4 +310,4 @@ digest.
    The set itself is unchanged on the mirror, so its digest and `SHA256SUMS` still verify what you fetched.
 
 The build and alpine images install packages from Debian and Alpine as they build; their exact source packages are
-in the set, in `debian/` and `alpine/`, with the aports commit of each Alpine package in `alpine/COMMITS.txt`.
+in the set, in `debian/` and `alpine/`, with the aports commit of each Alpine package in `alpine/COMMITS.txt`, and the host the aports repository was cloned from in `alpine/APORTS-SOURCE.txt`.

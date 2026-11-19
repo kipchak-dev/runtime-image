@@ -19,7 +19,18 @@ branch="$(cut -d. -f1,2 /etc/alpine-release)-stable"
 # set. abuild checks every file against the APKBUILD's sha512sums wherever it came from.
 DISTFILES_MIRROR="https://distfiles.alpinelinux.org/distfiles/v$(cut -d. -f1,2 /etc/alpine-release)"
 export DISTFILES_MIRROR
-git clone -q --filter=blob:none --no-checkout -b "${branch}" https://gitlab.alpinelinux.org/alpine/aports.git /tmp/aports
+# Alpine's GitLab first. It refuses some automated clients from cloud addresses (HTTP 418), so its official mirror on
+# GitHub serves instead when it does. A git commit id names its content, so the commits chosen below are the same
+# whichever host served them; the set records which one did.
+aports=''
+for url in https://gitlab.alpinelinux.org/alpine/aports.git https://github.com/alpinelinux/aports.git; do
+	rm -rf /tmp/aports
+	if git clone -q --filter=blob:none --no-checkout -b "${branch}" "${url}" /tmp/aports; then aports="${url}"; break; fi
+	echo "Could not clone aports from ${url}; trying the next host." >&2
+done
+[ -n "${aports}" ] || { echo 'Could not clone aports from any host.' >&2; exit 1; }
+echo "aports: ${aports}, ${branch}"
+printf '%s %s\n' "${aports}" "${branch}" > "${out}/APORTS-SOURCE.txt"
 cd /tmp/aports
 
 : > "${out}/COMMITS.txt"
