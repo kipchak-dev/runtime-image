@@ -192,6 +192,9 @@ grep -qF "if (getenv('SPC_DOWNLOAD_ONLY') === '1') { return; }" src/StaticPHP/Pa
 # other hosts, and requests that carried no token, fail as before.
 # The same patch records, for every download, the address it came from in downloads/.download-urls, which the source set
 # carries so that Mamluk's promote job can download each archive again and compare it (Amendment 1).
+# When the anonymous request is refused too because the runner's shared address has used its hourly allowance, the patch
+# waits for the allowance to reset (at most an hour) and asks once more (github-rate-limit.php).
+cp /usr/local/bin/github-rate-limit.php src/kipchak-github-rate-limit.php
 php <<'PHP'
 <?php
 $file = 'src/StaticPHP/Runtime/Shell/DefaultShell.php';
@@ -205,7 +208,14 @@ $edits = [
     "        if (\$ret === 2 || \$ret === -1073741510) {\n" =>
         "        if (\$ret === 22 && str_starts_with(\$url, 'https://api.github.com/') && preg_grep('/^Authorization:/i', \$headers) !== []) {\n"
         . "            logger()->warning(\"GitHub refused the token for {\$url}; asking again without it\");\n"
-        . "            return \$this->executeCurl(\$url, \$method, array_values(preg_grep('/^Authorization:/i', \$headers, PREG_GREP_INVERT)), \$hooks, \$retries, \$compressed);\n"
+        . "            \$anonymous = array_values(preg_grep('/^Authorization:/i', \$headers, PREG_GREP_INVERT));\n"
+        . "            \$answer = \$this->executeCurl(\$url, \$method, \$anonymous, \$hooks, \$retries, \$compressed);\n"
+        . "            require_once dirname(__DIR__, 3) . '/kipchak-github-rate-limit.php';\n"
+        . "            if (\$answer === false && \\kipchak_github_rate_limit_wait()) {\n"
+        . "                logger()->warning(\"GitHub's anonymous allowance was used up; waited for it to reset, asking again for {\$url}\");\n"
+        . "                \$answer = \$this->executeCurl(\$url, \$method, \$anonymous, \$hooks, \$retries, \$compressed);\n"
+        . "            }\n"
+        . "            return \$answer;\n"
         . "        }\n"
         . "        if (\$ret === 2 || \$ret === -1073741510) {\n",
     // executeCurlDownload: the archive downloads, whose URLs for GitHub tarballs are on api.github.com too.
@@ -217,7 +227,17 @@ $edits = [
         . "                throw \$e;\n"
         . "            }\n"
         . "            logger()->warning(\"GitHub refused the token for {\$url}; downloading again without it\");\n"
-        . "            \$this->executeCurlDownload(\$url, \$path, array_values(preg_grep('/^Authorization:/i', \$headers, PREG_GREP_INVERT)), \$hooks, \$retries);\n"
+        . "            \$anonymous = array_values(preg_grep('/^Authorization:/i', \$headers, PREG_GREP_INVERT));\n"
+        . "            try {\n"
+        . "                \$this->executeCurlDownload(\$url, \$path, \$anonymous, \$hooks, \$retries);\n"
+        . "            } catch (ExecutionException \$again) {\n"
+        . "                require_once dirname(__DIR__, 3) . '/kipchak-github-rate-limit.php';\n"
+        . "                if (!\\kipchak_github_rate_limit_wait()) {\n"
+        . "                    throw \$again;\n"
+        . "                }\n"
+        . "                logger()->warning(\"GitHub's anonymous allowance was used up; waited for it to reset, downloading again {\$url}\");\n"
+        . "                \$this->executeCurlDownload(\$url, \$path, \$anonymous, \$hooks, \$retries);\n"
+        . "            }\n"
         . "            return;\n"
         . "        }\n"
         // Where each download came from (Amendment 1): the address as requested, before any redirect, its headers
@@ -237,6 +257,7 @@ file_put_contents($file, $text);
 PHP
 [ "$(grep -c 'GitHub refused the token for' src/StaticPHP/Runtime/Shell/DefaultShell.php)" = 2 ] \
 	&& grep -qF "dirname(\$path) . '/.download-urls'" src/StaticPHP/Runtime/Shell/DefaultShell.php \
+	&& [ "$(grep -c 'kipchak_github_rate_limit_wait()' src/StaticPHP/Runtime/Shell/DefaultShell.php)" = 2 ] \
 	&& php -l src/StaticPHP/Runtime/Shell/DefaultShell.php > /dev/null \
 	|| { echo 'The anonymous retry did not apply.' >&2; exit 1; }
 

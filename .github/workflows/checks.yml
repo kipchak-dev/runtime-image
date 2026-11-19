@@ -21,6 +21,8 @@ jobs:
         run: sh php-hardened/tests/build-structure-test.sh
       - name: Every input pinned, the same for every builder
         run: sh php-hardened/tests/pins-test.sh
+      - name: The GitHub rate-limit wait
+        run: php php-hardened/tests/github-rate-limit-test.php
       - name: The recorded download addresses are public (Amendment 1, P5)
         run: sh php-hardened/tests/download-urls-test.sh
       - name: The scripts pass shellcheck
