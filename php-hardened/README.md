@@ -209,7 +209,7 @@ not.
 
 Anyone may build the image from this recipe. GitHub Actions builds both PHP versions, natively on `linux/amd64` and
 `linux/arm64`, on every commit to `master` and each week (`.github/workflows/build.yml`), into a private staging
-package. Mamluk checks each of those builds, rebuilds it for comparison, and publishes and signs the images Kipchak
+package. Mamluk checks each build's provenance, then copies the images by digest and signs the images Kipchak
 Enterprise customers receive. Builds you make yourself are your own: they are not signed by Mamluk and are not
 covered by support under an Order.
 
