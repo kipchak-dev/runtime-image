@@ -23,10 +23,10 @@ image names (see [Rebuilding from the source set](php-hardened/README.md#rebuild
 ## Mamluk's images
 
 GitHub Actions builds this recipe on every commit to `master` and each week, into a private staging package. Before an
-image is published, Mamluk checks the build's provenance, re-verifies every source it was built from against the
-upstream projects, rebuilds the `linux/amd64` binary from those sources on its own builder and compares the result.
-Only then is the image copied to Mamluk's registry and signed with Mamluk's key. Mamluk's signature therefore attests
-a build checked against this recipe's provenance and against Mamluk's own rebuild.
+image is published, Mamluk checks its build provenance: the image must have been built by this repository's `build.yml`
+workflow on `master`, and its attested digest must equal the staged image's digest. Only then is the image copied by
+digest to Mamluk's registry, with the source set it was built from, and signed with Mamluk's key. Mamluk's signature
+therefore attests that the image is the one this recipe's workflow built and attested, unchanged.
 
 Support under a Kipchak Enterprise Order covers Mamluk's signed images only, not images built from this recipe by
 anyone else.
