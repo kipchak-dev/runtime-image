@@ -199,5 +199,34 @@ elif grep -q 'offline, from the records alone' "$W/control.out"; then
     echo "ok: control: without the partial tiles, sumdb-prove.sh fails at its own offline check"
 else echo "FAIL: control: it failed, but not at the offline check:"; tail -n 3 "$W/control.out"; fail=1; fi
 
+# The third case (build 44876161556, 21 November 2026): a version the build used only to resolve requirements has its
+# go.mod in the records, but no zip and no .info. The set check verifies only its go.mod, so the offline check must
+# too, and must read the records as the set writer prepares them (.info written). Client a's records, with its module's
+# zip and .info removed.
+mkdir -p "$W/P3"; cp -R "$W/a/mod/cache/download/." "$W/P3/"; chmod -R u+w "$W/P3"
+v="$W/P3/$(printf '%s' "${A_MOD%@*}" | tr '[:upper:]' '[:lower:]')/@v/${A_MOD##*@}"
+rm -f "$v.zip" "$v.ziphash" "$v.info"
+cp -R "$W/P3" "$W/P3-tamper"; cp -R "$W/P3" "$W/P3-control"
+three() { # three SCRIPT RECORDS OUT
+    sh "$1" --check-offline "$GO" "$2" "$NOTE_A" > "$3" 2>&1
+}
+if three "$HERE/sumdb-prove.sh" "$W/P3" "$W/three.out"; then
+    echo "ok: third case: a version with go.mod and no zip or .info verifies offline, on its go.mod"
+else echo "FAIL: third case: it did not verify:"; tail -n 3 "$W/three.out"; fail=1; fi
+t="$(find "$W/P3-tamper/sumdb/sum.golang.org/tile" -type f | head -n 1)"
+n=$(wc -c < "$t"); head -c $((n - 1)) "$t" > "$t.new"; printf 'Z' >> "$t.new"; mv "$t.new" "$t"
+if three "$HERE/sumdb-prove.sh" "$W/P3-tamper" "$W/three-t.out"; then
+    echo "FAIL: third case, control: an altered tile was accepted for a version with no zip"; fail=1
+elif grep -q 'verifying go.mod' "$W/three-t.out" && ! grep -q 'no such file' "$W/three-t.out"; then
+    echo "ok: third case, control: an altered tile is refused as a go.mod verification error"
+else echo "FAIL: third case, control: it failed, but not on verification:"; tail -n 3 "$W/three-t.out"; fail=1; fi
+sed '/\[ -f "\$info" \] || printf/d' "$HERE/sumdb-prove.sh" > "$W/no-info.sh"
+if cmp -s "$HERE/sumdb-prove.sh" "$W/no-info.sh"; then echo "FAIL: third case, control: the sed changed nothing"; fail=1
+elif three "$W/no-info.sh" "$W/P3-control" "$W/three-c.out"; then
+    echo "FAIL: third case, control: without the .info writing, the check still passed"; fail=1
+elif grep -q '\.info: no such file' "$W/three-c.out"; then
+    echo "ok: third case, control: without the .info writing, the check fails as build 44876161556 did"
+else echo "FAIL: third case, control: it failed, but not on .info:"; tail -n 3 "$W/three-c.out"; fail=1; fi
+
 [ "$fail" -eq 0 ] && echo "sumdb-prove: the failure, the fix and the control behave as stated"
 exit "$fail"

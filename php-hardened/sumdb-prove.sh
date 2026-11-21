@@ -151,16 +151,42 @@ rm -f "$sizes"
 o="$(mktemp -d)"
 mkdir -p "$o/proxy" && cp -R "$P/." "$o/proxy/"
 touch "$o/proxy/sumdb/sum.golang.org/supported"
+# As the set writer prepares the set (build-frankenphp.sh, after the module caches are copied): Go keeps no .info for a
+# module it fetched only as a requirement, but reading a version from a file proxy needs one, so it is written for
+# every version the records hold; and Go's lock files are dropped. (Found on 21 November 2026, build 44876161556:
+# without this, the check failed on cel.dev/cel-go@v0.32.0's missing .info, which the set itself would have had.)
+find "$o/proxy" -name '*.mod' -path '*/@v/*' | while read -r mod; do
+	info="${mod%.mod}.info"
+	[ -f "$info" ] || printf '{"Version":"%s"}\n' "$(basename "${mod%.mod}")" > "$info"
+done
+find "$o/proxy" -name '*.lock' -delete
 for note in "$@"; do
 	while read -r m; do
 		c="$(mktemp -d -p "$o")"
 		mkdir -p "$c/gopath/pkg/sumdb/sum.golang.org"
 		cp "$note" "$c/gopath/pkg/sumdb/sum.golang.org/latest"
-		if ! (cd "$c" && env GOPATH="$c/gopath" GOMODCACHE="$c/mod" GOFLAGS=-mod=mod GOTOOLCHAIN=local \
+		# A version the build used only to resolve requirements has its go.mod in the records but no zip, and the set
+		# check verifies only that go.mod. go mod download always asks for the zip, so with -json the result is read:
+		# with the zip in the records, the download must succeed; without it, go.mod must have verified (GoModSum set)
+		# and the missing zip must be the only error. A verification failure leaves GoModSum empty and names it.
+		(cd "$c" && env GOPATH="$c/gopath" GOMODCACHE="$c/mod" GOFLAGS=-mod=mod GOTOOLCHAIN=local \
 			GOPROXY="file://$o/proxy" GOSUMDB=sum.golang.org GONOSUMDB= GONOSUMCHECK= GOPRIVATE= GOINSECURE= \
 			HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 http_proxy=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 NO_PROXY= no_proxy= \
-			"$go" mod download "$m" > /dev/null 2> "$c/err"); then
-			grep -v '^go: downloading' "$c/err" | head -n 10 >&2
+			"$go" mod download -json "$m" > "$c/out" 2> "$c/err") && rc=0 || rc=$?
+		mpath="${m%@*}"; mver="${m##*@}"
+		zip="$o/proxy/$(printf '%s' "$mpath" | sed 's/[A-Z]/!&/g' | tr '[:upper:]' '[:lower:]')/@v/$(printf '%s' "$mver" | sed 's/[A-Z]/!&/g' | tr '[:upper:]' '[:lower:]').zip"
+		verified=no
+		if [ -f "$zip" ]; then
+			[ "$rc" -eq 0 ] && ! grep -q '"Error"' "$c/out" && verified=yes
+		elif grep -q '"GoModSum": "h1:' "$c/out" \
+			&& [ "$(grep -c '"Error"' "$c/out")" -eq 1 ] \
+			&& grep -q '"Error": ".*\.zip: no such file or directory"' "$c/out" \
+			&& ! grep -q 'verifying' "$c/out"; then
+			verified=yes
+		fi
+		if [ "$verified" != yes ]; then
+			grep -h '"Error"' "$c/out" | head -n 3 >&2
+			grep -v '^go: downloading' "$c/err" | head -n 5 >&2
 			echo "sumdb-prove: offline, from the records alone, the answer for $m did not verify against the note $note" >&2
 			chmod -R u+w "$o"; rm -rf "$o"
 			exit 1
