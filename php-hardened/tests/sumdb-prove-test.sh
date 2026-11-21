@@ -54,7 +54,7 @@ T1="$(tree "$W/a/gopath/pkg/sumdb/sum.golang.org/latest")"
 # is from a tree whose level-1 tile differs: the tile the set check found missing was such a tile.
 n=0
 until [ "$(( $(curl -fsS https://sum.golang.org/latest | awk 'NR == 2') / 256 ))" -gt "$(( T1 / 256 + 1 ))" ] 2> /dev/null; do
-    n=$((n + 1)); [ "$n" -le 90 ] || { echo "FAIL: the checksum tree did not grow enough in 15 minutes"; exit 1; }
+    n=$((n + 1)); [ "$n" -le 240 ] || { echo "FAIL: the checksum tree did not grow enough in 40 minutes"; exit 1; }
     sleep 10
 done
 # The first full data tile after client a's tree: every record in it has an ID larger than client a's tree. A tile index
@@ -171,6 +171,25 @@ else echo "FAIL: it failed offline, but not on that partial tile:"; tail -n 2 "$
 if sh "$HERE/sumdb-prove.sh" --check-offline "$GO" "$W/P2" "$W/note-s1" && near "$W/P2"; then
     echo "ok: sumdb-prove.sh writes the partial tile, passes its own offline check, and the client verifies offline"
 else echo "FAIL: the second case is not fixed"; tail -n 3 "$c/out"; fail=1; fi
+# Control (architect AM1): a derived tile is safe only because Go checks every tile against the signed tree note. The
+# derived .p tile with one hash byte altered must be refused with a verification error, not a missing-tile error. It is
+# run with the caller's environment turning verification off every way Go allows, to show the script turns it back on.
+cp -R "$W/P2" "$W/P2-tamper"
+T="$W/P2-tamper/sumdb/sum.golang.org/$IDX.p/$((S2 % 256))"
+[ -f "$T" ] || { echo "FAIL: control AM1: no derived tile $IDX.p/$((S2 % 256)) to alter"; exit 1; }
+n=$(wc -c < "$T"); last=$(tail -c 1 "$T" | od -An -tu1 | tr -d ' ')
+head -c $((n - 1)) "$T" > "$T.new"
+if [ "$last" = 65 ]; then printf 'B' >> "$T.new"; else printf 'A' >> "$T.new"; fi
+mv "$T.new" "$T"
+if env GONOSUMDB='*' GONOSUMCHECK=1 GONOSUMVERIFY=1 GOPRIVATE='*' GOINSECURE='*' GOFLAGS=-insecure GOSUMDB=off \
+    sh "$HERE/sumdb-prove.sh" --check-offline "$GO" "$W/P2-tamper" "$W/note-s1" > "$W/tamper.out" 2>&1; then
+    echo "FAIL: control AM1: an altered tile was accepted"; fail=1
+elif grep -q 'no such file' "$W/tamper.out"; then
+    echo "FAIL: control AM1: it failed on a missing tile, not on verification:"; tail -n 3 "$W/tamper.out"; fail=1
+elif grep -q 'did not verify' "$W/tamper.out" && grep -qiE 'verif|security|inconsistent|mismatch' "$W/tamper.out"; then
+    echo "ok: control AM1: an altered derived tile is refused by verification, with verification switched off in the caller's environment"
+    grep -iE 'verif|security|inconsistent|mismatch' "$W/tamper.out" | grep -v 'did not verify' | head -n 1 | cut -c1-200 | sed 's/^/    /'
+else echo "FAIL: control AM1: it failed, but not as a verification error:"; tail -n 3 "$W/tamper.out"; fail=1; fi
 # Control: the partial-tile writing removed. The script's own offline check must then fail on the same records.
 sed 's/head -c \$((width \* 32)) "\$source" > "\$part"/: > \/dev\/null/' "$HERE/sumdb-prove.sh" > "$W/no-partials.sh"
 if cmp -s "$HERE/sumdb-prove.sh" "$W/no-partials.sh"; then echo "FAIL: control: the sed changed nothing"; fail=1

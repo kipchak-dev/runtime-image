@@ -115,7 +115,7 @@ for note in "$@"; do
 	cp -R "$P/." "$w/modcache/cache/download/"
 	# shellcheck disable=SC2046 # one argument per module@version
 	if ! (cd "$w" && env GOPATH="$w/gopath" GOMODCACHE="$w/modcache" GOFLAGS= GOTOOLCHAIN=local \
-		GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org GONOSUMDB= GONOSUMCHECK= GOPRIVATE= \
+		GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org GONOSUMDB= GONOSUMCHECK= GOPRIVATE= GOINSECURE= \
 		"$go" mod download $(cat "$list") > /dev/null 2> "$w/err"); then
 		grep -v '^go: downloading' "$w/err" | head -n 10 >&2
 		echo "sumdb-prove: a checksum answer did not verify against the note $note" >&2
@@ -157,7 +157,7 @@ for note in "$@"; do
 		mkdir -p "$c/gopath/pkg/sumdb/sum.golang.org"
 		cp "$note" "$c/gopath/pkg/sumdb/sum.golang.org/latest"
 		if ! (cd "$c" && env GOPATH="$c/gopath" GOMODCACHE="$c/mod" GOFLAGS=-mod=mod GOTOOLCHAIN=local \
-			GOPROXY="file://$o/proxy" GOSUMDB=sum.golang.org GONOSUMDB= GONOSUMCHECK= GOPRIVATE= \
+			GOPROXY="file://$o/proxy" GOSUMDB=sum.golang.org GONOSUMDB= GONOSUMCHECK= GOPRIVATE= GOINSECURE= \
 			HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 http_proxy=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 NO_PROXY= no_proxy= \
 			"$go" mod download "$m" > /dev/null 2> "$c/err"); then
 			grep -v '^go: downloading' "$c/err" | head -n 10 >&2
