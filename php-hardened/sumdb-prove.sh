@@ -8,12 +8,83 @@
 # missing; those tiles are then added to the set's records. Each tile is checked by Go against sum.golang.org's key.
 #
 #   sumdb-prove.sh GO PROXY_DIR NOTE...
+#   sumdb-prove.sh --partial-tiles PROXY_DIR SIZE...
+#   sumdb-prove.sh --check-offline GO PROXY_DIR NOTE...
 #
 # GO is the go command; PROXY_DIR is a module proxy directory as the set holds it (cache/download layout, with
 # sumdb/sum.golang.org/lookup and supported); each NOTE is a client's tree note, as Go keeps it in
 # $GOPATH/pkg/sumdb/sum.golang.org/latest. Network required. Exit codes: 0 every answer verified against every note,
-# and the tiles that took are in PROXY_DIR; 1 an answer did not verify, or Go failed; 2 the input is wrong.
+# online and then offline from PROXY_DIR alone, and the tiles that took are in PROXY_DIR; 1 an answer did not verify,
+# or Go failed; 2 the input is wrong.
+#
+# Partial tiles (found 20 November 2026, build 44754545641). A tree whose size is not a multiple of 256 ends, at each
+# level, in a partial tile, read at tile/8/<level>/<index>.p/<width>. Online, Go takes a partial tile from a wider one it
+# already holds at the same place (a longer partial tile, or the full tile); read from a file:// proxy, as the set check
+# reads the set, it asks for the partial tile of the exact width. The build met this with trees 71784039, 71784053 and
+# 71784108, all ending in tile x280/406: online, x280/406.p/172 served for .p/117; offline, .p/117 was missing. So for
+# every tree size the set names (each note, and each answer's signed tree), a missing partial tile is written from the
+# narrowest wider tile present at the same place: a partial tile of width W is exactly the first W hashes, 32 bytes
+# each, of any wider tile there. Then every answer is checked again against every note from PROXY_DIR alone, as the set
+# check will, so that a gap fails here, while the network is still there, and not in the set check.
+# --partial-tiles does only the writing, with no go and no network (the structure tests run it). --check-offline skips
+# the network step: it writes the partial tiles and runs the offline check on the records as they are (the live test).
 set -eu
+
+# A tile index in groups of three digits, all but the last with an x: 280406 is x280/406, 5 is 005.
+tile_index() {
+	printf '%d' "$1" | awk '{ s = $0; while (length(s) % 3) s = "0" s; out = ""; for (i = 1; i <= length(s); i += 3) { g = substr(s, i, 3); out = out (i + 3 <= length(s) ? "x" g "/" : g) } print out }'
+}
+# partial_tiles DIR SIZE...: writes each missing partial hash tile from its full tile; prints how many it wrote.
+partial_tiles() {
+	tiles="$1/sumdb/sum.golang.org/tile/8"; shift
+	written=0
+	for size in "$@"; do
+		case "$size" in '' | *[!0-9]*) echo "sumdb-prove: '$size' is not a tree size" >&2; exit 2 ;; esac
+		level=0; n="$size"
+		while [ "$n" -gt 0 ]; do
+			index=$((n / 256)); width=$((n % 256))
+			if [ "$width" -gt 0 ]; then
+				full="$tiles/$level/$(tile_index "$index")"
+				part="$full.p/$width"
+				if [ ! -f "$part" ]; then
+					# The source: the full tile, else the narrowest partial tile at the same index that is wider.
+					source=""
+					if [ -f "$full" ]; then
+						source="$full"; hashes=256
+					elif [ -d "$full.p" ]; then
+						hashes=""
+						for wider in "$full.p"/*; do
+							w="${wider##*/}"
+							case "$w" in '' | *[!0-9]*) continue ;; esac
+							if [ "$w" -gt "$width" ] && { [ -z "$hashes" ] || [ "$w" -lt "$hashes" ]; }; then hashes="$w"; fi
+						done
+						[ -n "$hashes" ] && source="$full.p/$hashes"
+					fi
+					if [ -n "$source" ]; then
+						[ "$(wc -c < "$source")" -eq $((hashes * 32)) ] \
+							|| { echo "sumdb-prove: $source does not hold $hashes hashes" >&2; exit 1; }
+						mkdir -p "$(dirname "$part")"
+						head -c $((width * 32)) "$source" > "$part"
+						written=$((written + 1))
+					fi
+				fi
+			fi
+			n="$index"; level=$((level + 1))
+		done
+	done
+	echo "$written"
+}
+if [ "${1:-}" = --partial-tiles ]; then
+	[ -d "${2:-}" ] || { echo "sumdb-prove: no proxy directory '${2:-}'" >&2; exit 2; }
+	d="$2"; shift 2
+	[ "$#" -gt 0 ] || { echo "sumdb-prove: no tree size given" >&2; exit 2; }
+	partial_tiles "$d" "$@" > /dev/null
+	exit 0
+fi
+
+# --check-offline: no network step; only the partial tiles and the offline check, on records as they are (the tests).
+online=yes
+if [ "${1:-}" = --check-offline ]; then online=no; shift; fi
 go="${1:-}"; P="${2:-}"
 [ -x "$go" ] || command -v "$go" > /dev/null 2>&1 || { echo "sumdb-prove: no go command '$go'" >&2; exit 2; }
 [ -d "$P/sumdb/sum.golang.org/lookup" ] || { echo "sumdb-prove: $P holds no checksum answers" >&2; exit 2; }
@@ -29,6 +100,7 @@ find "$lookups" -type f | sed "s|^$lookups/||" | sed 's/!\([a-z]\)/\U\1/g' | sor
 before="$(find "$P/sumdb/sum.golang.org" -path '*/tile/*' -type f | wc -l)"
 
 for note in "$@"; do
+	[ "$online" = yes ] || break
 	[ -f "$note" ] || { echo "sumdb-prove: no tree note at $note" >&2; exit 2; }
 	w="$(mktemp -d)"
 	mkdir -p "$w/gopath/pkg/sumdb/sum.golang.org"
@@ -60,6 +132,44 @@ for note in "$@"; do
 	fi
 	chmod -R u+w "$w"; rm -rf "$w"
 done
+
+# The partial tiles for every tree size the set names: each note's, and each answer's signed tree's.
+sizes="$(mktemp)"
+for note in "$@"; do awk '/^go.sum database tree$/ { getline; print; exit }' "$note"; done > "$sizes"
+find "$lookups" -type f -exec awk '/^go.sum database tree$/ { getline; print; exit }' {} \; >> "$sizes"
+# shellcheck disable=SC2046 # one argument per tree size
+partials="$(partial_tiles "$P" $(sort -un "$sizes"))"
+rm -f "$sizes"
+
+# Offline, as the set check reads the set: a copy of the records as a file:// proxy, with sumdb served from it
+# ("supported"), the same GOSUMDB as the set check, and a fresh module cache. Every HTTP and HTTPS request goes to an
+# address that refuses it, so that nothing can be fetched and a missing tile fails. (Naming a URL in GOSUMDB is not
+# used for this: Go then reads the checksum database from that URL instead of from the proxy.)
+# Each answer is checked on its own, against each note, by a fresh client. Go downloads several modules in no fixed
+# order, and the tiles a proof reads depend on which answer a client meets first (on 20 November, meeting tree 71784108
+# before 71784053 needed only .p/172; the other order needed .p/117). One answer per client is the order-free case.
+o="$(mktemp -d)"
+mkdir -p "$o/proxy" && cp -R "$P/." "$o/proxy/"
+touch "$o/proxy/sumdb/sum.golang.org/supported"
+for note in "$@"; do
+	while read -r m; do
+		c="$(mktemp -d -p "$o")"
+		mkdir -p "$c/gopath/pkg/sumdb/sum.golang.org"
+		cp "$note" "$c/gopath/pkg/sumdb/sum.golang.org/latest"
+		if ! (cd "$c" && env GOPATH="$c/gopath" GOMODCACHE="$c/mod" GOFLAGS=-mod=mod GOTOOLCHAIN=local \
+			GOPROXY="file://$o/proxy" GOSUMDB=sum.golang.org GONOSUMDB= GONOSUMCHECK= GOPRIVATE= \
+			HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 http_proxy=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 NO_PROXY= no_proxy= \
+			"$go" mod download "$m" > /dev/null 2> "$c/err"); then
+			grep -v '^go: downloading' "$c/err" | head -n 10 >&2
+			echo "sumdb-prove: offline, from the records alone, the answer for $m did not verify against the note $note" >&2
+			chmod -R u+w "$o"; rm -rf "$o"
+			exit 1
+		fi
+		chmod -R u+w "$c"; rm -rf "$c"
+	done < "$list"
+done
+chmod -R u+w "$o"; rm -rf "$o"
+
 after="$(find "$P/sumdb/sum.golang.org" -path '*/tile/*' -type f | wc -l)"
-echo "sumdb-prove: $(wc -l < "$list" | tr -d ' ') answers verified against $# tree note(s); $((after - before)) proof tile(s) added"
+echo "sumdb-prove: $(wc -l < "$list" | tr -d ' ') answers verified against $# tree note(s), $([ "$online" = yes ] && echo "online and ")offline, one answer per client; $((after - before)) proof tile(s) added, $partials of them partial tiles written from wider tiles"
 rm -f "$list"
