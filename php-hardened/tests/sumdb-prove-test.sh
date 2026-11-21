@@ -125,6 +125,9 @@ while read -r m; do
     curl -fsS "https://sum.golang.org/lookup/$m" > "$W/fresh-answers/$i" || continue
     s="$(lookup_tree "$W/fresh-answers/$i")"
     case "$s" in '' | *[!0-9]*) continue ;; esac
+    # A module this go command cannot download (a newer go directive, a module gone from the proxy) is passed over.
+    (cd "$W" && env GOPATH="$W/probe/gopath" GOMODCACHE="$W/probe/mod" GOFLAGS= GOTOOLCHAIN=local \
+        GOPROXY=https://proxy.golang.org GOSUMDB=sum.golang.org GONOSUMDB= GOPRIVATE= "$GO" mod download "$m" > /dev/null 2>&1) || continue
     if [ -z "$S1" ] || [ $((s / 256)) -ne $((S1 / 256)) ] || [ "$s" -le "$S1" ]; then S1="$s"; M1="$m"; A1="$W/fresh-answers/$i"; S2=""; continue; fi
     if [ -z "$S2" ]; then S2="$s"; M2="$m"; A2="$W/fresh-answers/$i"; continue; fi
     if [ "$s" -gt "$S2" ] && [ $((s / 256)) -eq $((S2 / 256)) ]; then S3="$s"; found=yes; break; fi
