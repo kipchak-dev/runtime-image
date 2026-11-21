@@ -228,5 +228,23 @@ elif grep -q '\.info: no such file' "$W/three-c.out"; then
     echo "ok: third case, control: without the .info writing, the check fails as build 44876161556 did"
 else echo "FAIL: third case, control: it failed, but not on .info:"; tail -n 3 "$W/three-c.out"; fail=1; fi
 
+# The fourth case (run 44881384791, 21 November 2026): an answer Go cached while resolving, for a version whose files it
+# never fetched (no go.mod, no zip, no .info). No rebuild reads it, so the check counts it and passes. Control: the skip
+# removed, the check fails on that version, as the run did.
+mkdir -p "$W/P4"; cp -R "$W/a/mod/cache/download/." "$W/P4/"; chmod -R u+w "$W/P4"
+v4="$W/P4/$(printf '%s' "${A_MOD%@*}" | tr '[:upper:]' '[:lower:]')/@v/${A_MOD##*@}"
+rm -f "$v4.mod" "$v4.zip" "$v4.ziphash" "$v4.info"
+cp -R "$W/P4" "$W/P4-control"
+if sh "$HERE/sumdb-prove.sh" --check-offline "$GO" "$W/P4" "$NOTE_A" > "$W/four.out" 2>&1 && grep -q '1 answer(s) for versions with no module files' "$W/four.out"; then
+    echo "ok: fourth case: an answer for a version with no module files is counted, not checked, and the check passes"
+else echo "FAIL: fourth case:"; tail -n 2 "$W/four.out"; fail=1; fi
+sed 's/^		if \[ ! -f "\$vdir.mod" \]; then$/		if false; then/' "$HERE/sumdb-prove.sh" > "$W/no-skip.sh"
+if cmp -s "$HERE/sumdb-prove.sh" "$W/no-skip.sh"; then echo "FAIL: fourth case, control: the sed changed nothing"; fail=1
+elif sh "$W/no-skip.sh" --check-offline "$GO" "$W/P4-control" "$NOTE_A" > "$W/four-c.out" 2>&1; then
+    echo "FAIL: fourth case, control: without the skip, the check still passed"; fail=1
+elif grep -q 'did not verify' "$W/four-c.out"; then
+    echo "ok: fourth case, control: without the skip, the check fails on that version, as run 44881384791 did"
+else echo "FAIL: fourth case, control: it failed otherwise:"; tail -n 2 "$W/four-c.out"; fail=1; fi
+
 [ "$fail" -eq 0 ] && echo "sumdb-prove: the failure, the fix and the control behave as stated"
 exit "$fail"

@@ -160,8 +160,20 @@ find "$o/proxy" -name '*.mod' -path '*/@v/*' | while read -r mod; do
 	[ -f "$info" ] || printf '{"Version":"%s"}\n' "$(basename "${mod%.mod}")" > "$info"
 done
 find "$o/proxy" -name '*.lock' -delete
+unread=0
 for note in "$@"; do
 	while read -r m; do
+		# An answer Go cached while resolving, for a version whose files it never fetched (no go.mod, no zip), is read by
+		# no rebuild: the set check reads an answer only for a version it downloads, and it can download only what the
+		# records hold. (Found on 21 November 2026, run 44881384791: github.com/dlclark/regexp2@v1.11.5.) Such answers
+		# are counted, not checked. A rebuild that needed one would fail set-check, which refuses a set missing a
+		# selected module (tests/set-check-zips-test.sh).
+		mpath="${m%@*}"; mver="${m##*@}"
+		vdir="$o/proxy/$(printf '%s' "$mpath" | sed 's/[A-Z]/!&/g' | tr '[:upper:]' '[:lower:]')/@v/$(printf '%s' "$mver" | sed 's/[A-Z]/!&/g' | tr '[:upper:]' '[:lower:]')"
+		if [ ! -f "$vdir.mod" ]; then
+			[ "$note" = "$1" ] && unread=$((unread + 1))
+			continue
+		fi
 		c="$(mktemp -d -p "$o")"
 		mkdir -p "$c/gopath/pkg/sumdb/sum.golang.org"
 		cp "$note" "$c/gopath/pkg/sumdb/sum.golang.org/latest"
@@ -173,8 +185,7 @@ for note in "$@"; do
 			GOPROXY="file://$o/proxy" GOSUMDB=sum.golang.org GONOSUMDB= GONOSUMCHECK= GOPRIVATE= GOINSECURE= \
 			HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 http_proxy=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 NO_PROXY= no_proxy= \
 			"$go" mod download -json "$m" > "$c/out" 2> "$c/err") && rc=0 || rc=$?
-		mpath="${m%@*}"; mver="${m##*@}"
-		zip="$o/proxy/$(printf '%s' "$mpath" | sed 's/[A-Z]/!&/g' | tr '[:upper:]' '[:lower:]')/@v/$(printf '%s' "$mver" | sed 's/[A-Z]/!&/g' | tr '[:upper:]' '[:lower:]').zip"
+		zip="$vdir.zip"
 		verified=no
 		if [ -f "$zip" ]; then
 			[ "$rc" -eq 0 ] && ! grep -q '"Error"' "$c/out" && verified=yes
@@ -197,5 +208,5 @@ done
 chmod -R u+w "$o"; rm -rf "$o"
 
 after="$(find "$P/sumdb/sum.golang.org" -path '*/tile/*' -type f | wc -l)"
-echo "sumdb-prove: $(wc -l < "$list" | tr -d ' ') answers verified against $# tree note(s), $([ "$online" = yes ] && echo "online and ")offline, one answer per client; $((after - before)) proof tile(s) added, $partials of them partial tiles written from wider tiles"
+echo "sumdb-prove: $(( $(wc -l < "$list") - unread )) answers verified against $# tree note(s), $([ "$online" = yes ] && echo "online and ")offline, one answer per client; $unread answer(s) for versions with no module files in the records, read by no rebuild, not checked; $((after - before)) proof tile(s) added, $partials of them partial tiles written from wider tiles"
 rm -f "$list"
