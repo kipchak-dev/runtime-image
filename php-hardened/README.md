@@ -165,8 +165,8 @@ Add `.ini` files to `/etc/frankenphp/php.d/`, or use `php_ini` in the Caddyfile,
 
 ## Updates
 
-* **PHP.** Each build looks up the latest release of its PHP version on php.net. The pipeline builds daily, so
-  a new PHP release is in the images within a day.
+* **PHP.** Each build looks up the latest release of its PHP version on php.net. The images are built every week,
+  and after each change to the recipe, so a new PHP release is in the images within a week.
 * **Libraries and extensions.** Most of static-php-cli's recipes fetch the latest release of a library or
   extension. The first build of each ISO week (`SOURCES_EPOCH`, e.g. `2026-W41`) downloads them all again and
   compiles from scratch; later builds that week reuse that binary. A security release of OpenSSL, curl or any
