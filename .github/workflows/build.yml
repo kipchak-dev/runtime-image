@@ -41,6 +41,7 @@ jobs:
     outputs:
       lines: ${{ steps.resolve.outputs.lines }}
       epoch: ${{ steps.resolve.outputs.epoch }}
+      revision: ${{ steps.resolve.outputs.revision }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -59,6 +60,11 @@ jobs:
           done
           echo "lines=$lines" >> "$GITHUB_OUTPUT"
           echo "epoch=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+          # The download cache's revision, as the Dockerfile sets it, so that the saved cache's key and the Dockerfile's
+          # cache name always agree (K-REG-1).
+          revision="$(sed -n 's/^ARG SOURCES_REVISION=\([0-9][0-9]*\)$/\1/p' php-hardened/Dockerfile)"
+          case "$revision" in '' | *[!0-9]*) echo "Could not read SOURCES_REVISION from the Dockerfile" >&2; exit 1 ;; esac
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
           echo "$lines"
 
   # The source set and the runtime for one line and one platform, in one job and one builder, so that both use the
@@ -78,12 +84,30 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # To attest the saved download cache's manifest (K-REG-1), as the index jobs attest the images.
+      attestations: write
+      id-token: write
+    env:
+      CACHE_PREFIX: spc-sources-${{ needs.resolve.outputs.revision }}-${{ matrix.platform.arch }}-${{ needs.resolve.outputs.epoch }}-
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Disk before the build
         run: df -h / "$RUNNER_TEMP"
+      # The weekly download cache (K-REG-1). Each job starts on a fresh runner, so the downloads an earlier build saved
+      # this week, for this architecture, are restored here and checked before the build may use them. The key never
+      # matches exactly, so the newest saved entry with this week's prefix is restored.
+      - name: Restore this week's downloads
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/downloads-cache
+          key: ${{ env.CACHE_PREFIX }}none
+          restore-keys: ${{ env.CACHE_PREFIX }}
+      - name: Check the restored downloads
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh php-hardened/downloads-cache.sh seed "$RUNNER_TEMP/downloads-cache" "$RUNNER_TEMP/downloads-seed" "$GITHUB_REF" "$GITHUB_REPOSITORY"
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
@@ -94,6 +118,7 @@ jobs:
       # run's own token reaches the build only as a secret mount, never as an argument (php-hardened/tests).
       - name: Build the source set
         id: sources
+        continue-on-error: true
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: php-hardened
@@ -103,11 +128,89 @@ jobs:
           provenance: false
           sbom: false
           secrets: github_token=${{ github.token }}
+          build-contexts: downloads-seed=${{ runner.temp }}/downloads-seed
           build-args: |
             PHP_VERSION=${{ matrix.php.release }}
             SOURCES_EPOCH=${{ needs.resolve.outputs.epoch }}
             SOURCES_SET=${{ matrix.php.set }}
           outputs: type=image,name=ghcr.io/kipchak-dev/runtime-builds,push-by-digest=true,name-canonical=true,push=true
+      # One retry, only for a download fault upstream (K-REG-1, option C): download-fault.sh reads the failed build's log
+      # and allows it only when an upstream download failed and no check did. The retry runs in the same builder, so it
+      # starts from everything the first attempt downloaded.
+      - name: Decide whether to retry the source set
+        id: fault
+        if: steps.sources.outcome == 'failure'
+        run: |
+          set -eu
+          docker buildx history logs > "$RUNNER_TEMP/sources-attempt-1.log" 2>&1 || true
+          grep -aE 'Download failed|Failed to get GitHub|Could not clone|Source files not fetched' "$RUNNER_TEMP/sources-attempt-1.log" | tail -n 5 || true
+          sh php-hardened/download-fault.sh "$RUNNER_TEMP/sources-attempt-1.log"
+          sleep 600
+      - name: Build the source set (retry after a download fault)
+        id: sources-retry
+        if: steps.sources.outcome == 'failure' && steps.fault.outcome == 'success'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: php-hardened
+          target: sources-set
+          platforms: linux/${{ matrix.platform.arch }}
+          pull: true
+          provenance: false
+          sbom: false
+          secrets: github_token=${{ github.token }}
+          build-contexts: downloads-seed=${{ runner.temp }}/downloads-seed
+          build-args: |
+            PHP_VERSION=${{ matrix.php.release }}
+            SOURCES_EPOCH=${{ needs.resolve.outputs.epoch }}
+            SOURCES_SET=${{ matrix.php.set }}
+          outputs: type=image,name=ghcr.io/kipchak-dev/runtime-builds,push-by-digest=true,name-canonical=true,push=true
+      # Saves what this job downloaded, as soon as the source set is built or has failed, so that a re-run this week starts
+      # from it; nothing later downloads. The
+      # manifest is attested with this workflow's identity on this branch; the restore above accepts nothing else.
+      # The same path as the restore, since the cache matches entries by path as well as key.
+      - name: Clear the restored downloads
+        if: ${{ !cancelled() }}
+        run: rm -rf "$RUNNER_TEMP/downloads-cache"
+      - name: Copy out this week's downloads
+        id: downloads-out
+        if: ${{ !cancelled() }}
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: php-hardened
+          target: downloads-out
+          platforms: linux/${{ matrix.platform.arch }}
+          provenance: false
+          sbom: false
+          build-args: |
+            SOURCES_EPOCH=${{ needs.resolve.outputs.epoch }}
+            DOWNLOADS_COPY_ID=${{ github.run_id }}-${{ github.run_attempt }}-${{ strategy.job-index }}
+          outputs: type=local,dest=${{ runner.temp }}/downloads-cache
+      - name: Check and list the downloads to save
+        id: downloads-manifest
+        if: ${{ !cancelled() && steps.downloads-out.outcome == 'success' }}
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          sh php-hardened/downloads-cache.sh no-token "$RUNNER_TEMP/downloads-cache"
+          sh php-hardened/downloads-cache.sh manifest "$RUNNER_TEMP/downloads-cache"
+          du -sh "$RUNNER_TEMP/downloads-cache"
+      - name: Attest the downloads manifest
+        id: downloads-attest
+        if: ${{ !cancelled() && steps.downloads-manifest.outcome == 'success' }}
+        # A cache that could not be saved costs the next run a full download, not this build.
+        continue-on-error: true
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: ${{ runner.temp }}/downloads-cache/SHA256SUMS
+      - name: Save this week's downloads
+        if: ${{ !cancelled() && steps.downloads-attest.outcome == 'success' }}
+        # A cache that could not be saved costs the next run a full download, not this build.
+        continue-on-error: true
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/downloads-cache
+          key: ${{ env.CACHE_PREFIX }}${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.php.line }}
       - name: Build the runtime
         id: runtime
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
@@ -125,7 +228,7 @@ jobs:
           outputs: type=image,name=ghcr.io/kipchak-dev/runtime-builds,push-by-digest=true,name-canonical=true,push=true
       - name: Record the digests
         env:
-          SOURCES: ${{ steps.sources.outputs.digest }}
+          SOURCES: ${{ steps.sources.outputs.digest || steps.sources-retry.outputs.digest }}
           RUNTIME: ${{ steps.runtime.outputs.digest }}
           ARCH: ${{ matrix.platform.arch }}
         run: |

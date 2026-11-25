@@ -24,9 +24,22 @@ ARG DEBIAN_IMAGE=debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f5860
 ARG ALPINE_IMAGE=alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 ARG COMPOSER_IMAGE=composer/composer:2-bin@sha256:56a1b0a72bacd78079e3fa49a49e7bf58326365753415c99385ea2b08bded0a5
 
+# Changing SOURCES_EPOCH recompiles the binary from freshly downloaded sources, picking up every library's latest
+# release. The pipeline and ./build.sh set it to the ISO week (2026-W41), so the first build of each week refreshes
+# the libraries and later builds that week reuse the result.
+ARG SOURCES_EPOCH=local
+# Part of the download cache's name. Change it with an override of a recipe's source (SQLite, ICU), which a cache
+# holding the old archive would otherwise ignore until the next week, or to take a security release at once.
+ARG SOURCES_REVISION=2
+
 # A source set to build from instead of the network: empty unless the `sources` build context names one, as a
 # rebuild from the mirror does (see the README and build-frankenphp.sh).
 FROM scratch AS sources
+
+# Downloads an earlier build saved this week, already checked by downloads-cache.sh: empty unless the build workflow
+# names a `downloads-seed` build context. The download step copies them into its cache before static-php-cli runs,
+# which then skips each one it finds.
+FROM scratch AS downloads-seed
 
 FROM ${COMPOSER_IMAGE} AS composer
 
@@ -55,13 +68,9 @@ ARG PHP_EXTENSION_LIBS=nghttp2
 # 1 to replace musl's allocator, which is slow with threads, with mimalloc.
 ARG MIMALLOC=1
 
-# Changing SOURCES_EPOCH recompiles the binary from freshly downloaded sources, picking up every library's latest
-# release. The pipeline and ./build.sh set it to the ISO week (2026-W41), so the first build of each week refreshes
-# the libraries and later builds that week reuse the result.
-ARG SOURCES_EPOCH=local
-# Part of the download cache's name. Change it with an override of a recipe's source (SQLite, ICU), which a cache
-# holding the old archive would otherwise ignore until the next week.
-ARG SOURCES_REVISION=2
+# The download cache's name: see SOURCES_EPOCH and SOURCES_REVISION at the top of this file.
+ARG SOURCES_EPOCH
+ARG SOURCES_REVISION
 ARG TARGETARCH
 
 COPY build-frankenphp.sh after-compile.sh check-sources.php check-download-urls.sh github-rate-limit.php sumdb-prove.sh /usr/local/bin/
@@ -73,6 +82,8 @@ COPY tests/check-sources-test.php /usr/local/bin/tests/
 RUN --mount=type=secret,id=github_token \
 	--mount=type=cache,id=spc-sources-${SOURCES_REVISION}-${TARGETARCH}-${SOURCES_EPOCH},target=/go/src/app/dist/static-php-cli/downloads,sharing=locked \
 	--mount=type=bind,from=sources,target=/sources \
+	--mount=type=bind,from=downloads-seed,target=/downloads-seed \
+	cp -a /downloads-seed/. /go/src/app/dist/static-php-cli/downloads/ && \
 	PHASE=download PHP_VERSION=${PHP_VERSION} SPC_COMMIT=${SPC_COMMIT} \
 	SQLITE_VERSION=${SQLITE_VERSION} SQLITE_ARCHIVE=${SQLITE_ARCHIVE} SQLITE_SHA3=${SQLITE_SHA3} \
 	STEP_CRYPTO_VERSION=${STEP_CRYPTO_VERSION} STEP_CERTIFICATES_VERSION=${STEP_CERTIFICATES_VERSION} XCADDY_VERSION=${XCADDY_VERSION} \
@@ -302,6 +313,22 @@ RUN apk add --no-cache -q tar \
 FROM scratch AS sources-set
 COPY --from=sources-pack /set/ /
 
+
+# The downloads directory as the download cache holds it, for the build workflow to save between jobs
+# (downloads-cache.sh). It reads the same cache as the binary stage and depends on no other stage, so it can be
+# built after a failed build to keep what that build downloaded.
+FROM ${FRANKENPHP_BUILDER} AS downloads-copy
+ARG SOURCES_EPOCH
+ARG SOURCES_REVISION
+ARG TARGETARCH
+# BuildKit keys this step's layer without the cache's contents, so the workflow passes a new value each time
+# (the run, attempt and job) to make it copy the cache as it is now.
+ARG DOWNLOADS_COPY_ID=local
+RUN --mount=type=cache,id=spc-sources-${SOURCES_REVISION}-${TARGETARCH}-${SOURCES_EPOCH},target=/downloads-cache,sharing=locked \
+	echo "copy ${DOWNLOADS_COPY_ID}" && mkdir -p /downloads && cp -a /downloads-cache/. /downloads/
+
+FROM scratch AS downloads-out
+COPY --from=downloads-copy /downloads/ /
 
 # The default target, and the last stage, so that a plain docker build produces the runtime image.
 FROM runtime AS default
